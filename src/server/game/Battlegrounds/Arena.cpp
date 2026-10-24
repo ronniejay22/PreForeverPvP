@@ -1217,6 +1217,21 @@ void Arena::EndBotFilledRatedMatch(uint32 winner)
         }
     }
 
+    // The team's own bots (the playerbot module's teammates for it) fought as
+    // copies under other guids, and are rated as members who were not there
+    // to be handed it.
+    std::vector<ObjectGuid> absent;
+    for (auto itr = arenaTeam->m_membersBegin(); itr != arenaTeam->m_membersEnd(); ++itr)
+        if (!m_Players.count(itr->Guid) && WasRosterBotDealt(itr->Guid))
+            absent.push_back(itr->Guid);
+    for (ObjectGuid const& member : absent)
+    {
+        if (won)
+            arenaTeam->OfflineMemberWon(member, cloneMatchmakerRating, matchmakerChange);
+        else
+            arenaTeam->OfflineMemberLost(member, cloneMatchmakerRating, matchmakerChange);
+    }
+
     arenaTeam->SaveToDB();
     arenaTeam->NotifyStatsChanged();
 }

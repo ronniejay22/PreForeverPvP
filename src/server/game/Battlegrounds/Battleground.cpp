@@ -2168,6 +2168,7 @@ void Battleground::Reset()
     m_BotFillOpponentsFielded = false;
     m_BotFillSide = 0;
     m_BotFillGateHeldMs = 0;
+    m_RosterBotsDealt.clear();
     m_PreparationSeatTakers.clear();
     m_SquadSeats.clear();
     m_WinnerSquad = BATTLEGROUND_NO_SQUAD;

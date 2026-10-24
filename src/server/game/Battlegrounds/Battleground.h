@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <deque>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -646,6 +647,12 @@ class TC_GAME_API Battleground
         // into whatever match holds that id by then.
         uint32 GetMatchSerial() const { return m_MatchSerial; }
         void SetMatchSerial(uint32 serial) { m_MatchSerial = serial; }
+        // An arena team's own bots the playerbot module dealt into this match
+        // (its teammates for a team of people). They fight as copies under
+        // other guids, and are rated as members who were not there to be
+        // handed it (Arena::EndBotFilledRatedMatch).
+        void NoteRosterBotDealt(ObjectGuid guid) { m_RosterBotsDealt.insert(guid); }
+        bool WasRosterBotDealt(ObjectGuid guid) const { return m_RosterBotsDealt.count(guid) != 0; }
         // The other side of such a match, the people's team; else 0.
         uint32 GetBotFillRatedTeam() const
         {
@@ -1274,6 +1281,7 @@ class TC_GAME_API Battleground
         bool   m_BotFillOpponentsFielded = false;           // see HasBotFillOpponentsFielded()
         uint32 m_BotFillSide = 0;                           // see GetBotFillSide()
         uint32 m_MatchSerial = 0;                           // see GetMatchSerial()
+        std::set<ObjectGuid> m_RosterBotsDealt;             // see NoteRosterBotDealt()
         uint32 m_BotFillGateHeldMs = 0;                     // see _ProcessJoin
         std::map<ObjectGuid, uint32> m_PreparationSeatTakers; // invited into a clone's seat -> team, see CountPreparationSeatsHeldByClones()
         uint32 m_BotFillSeatsOnTheWay[PVP_TEAMS_COUNT] = { }; // see SetBotFillSeatsOnTheWay()

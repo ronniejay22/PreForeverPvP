@@ -254,8 +254,10 @@ Playerbot.BgFill.RatedArena.Ladder.Enable = 0
 #    Playerbot.BgFill.RatedArena.Ladder.Teams5v5
 #        Description: Teams of each size the ladder keeps. Missing ones are made at startup and on
 #                     .reload config, each with the healers SkirmishArena.HealersPerTeam* asks for
-#                     and every class once while there is a choice. A character is on one team of a
-#                     size at most, so the number of level-cap PvP-only bots caps each size.
+#                     and every class once while there is a choice. One bot, one team: a bot on any
+#                     arena team - a ladder team of any size, or somebody's teammate (Ladder.Teammates)
+#                     - is dealt to no other, so the level-cap PvP-only bots cap the ladder as a whole.
+#                     Leave some over for teammates. tools/pvpbots/clone_pvp_bots.py grows the pool.
 #        Default:     12, 9, 6, 6
 
 Playerbot.BgFill.RatedArena.Ladder.Teams2v2 = 12
@@ -277,6 +279,19 @@ Playerbot.BgFill.RatedArena.Ladder.Teams5v5 = 6
 
 Playerbot.BgFill.RatedArena.Ladder.SimulateMinutes = 5
 Playerbot.BgFill.RatedArena.Ladder.SimulateGames = 1
+
+#    Playerbot.BgFill.RatedArena.Ladder.Teammates
+#        Description: A team of people playing rated against bots keeps the same bots beside it.
+#                     The first time it is short in a match, level-cap PvP-only bots that are on no
+#                     team join it for good - the healers SkirmishArena.HealersPerTeam* asks for (less
+#                     a person on it who heals), then everyone else, each class once while there is a
+#                     choice, hard tier first. They fill its empty seats from then on and are rated as
+#                     its members. `.arena ladder` and the arena ladder keeper show them. Needs
+#                     Ladder.Enable.
+#        Default:     1 - (Enabled)
+#                     0 - (Disabled, a short team of people is made up with any bots, as before)
+
+Playerbot.BgFill.RatedArena.Ladder.Teammates = 1
 
 #    Playerbot.BgFill.MaxPerTeam
 #        Description: Team size the clones fill up to, capped by the battleground's own maximum
