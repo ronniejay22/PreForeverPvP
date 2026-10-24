@@ -919,12 +919,17 @@ inline void Battleground::_ProcessJoin(uint32 diff)
     // ***           BATTLEGROUND STARTING SYSTEM            ***
     // *********************************************************
     // A bot-filled arena also holds its gates, at the last second of the
-    // countdown, for clones the bot fill is still loading in the background
-    // (SetBotFillSeatsOnTheWay) - BOT_FILL_GATE_HOLD_MS at most in all. A slow
-    // load then costs a short wait, instead of gates that open on a side still
-    // on its way and hand the match to the other one.
-    bool const holdForClones = isArena() && IsBotFillMatch() && GetStartDelayTime() <= int32(IN_MILLISECONDS) &&
-        m_BotFillSeatsOnTheWay[TEAM_ALLIANCE] + m_BotFillSeatsOnTheWay[TEAM_HORDE] != 0 &&
+    // countdown, while either side is still short - its clones load from the
+    // database in the background, and the bot fill asks again for any that
+    // take too long - for BOT_FILL_GATE_HOLD_MS at most in all. A slow load
+    // then costs a short wait, instead of gates that open on a side still on
+    // its way and hand the match to the other one. (Read off the sides
+    // themselves: a request the bot fill has just given up on is no longer
+    // "on the way" for the moment before it asks again, and the gates used to
+    // open in exactly that moment.)
+    bool const holdForClones = isArena() && IsBotFillMatch() && !IsSquadMatch() &&
+        GetStartDelayTime() <= int32(IN_MILLISECONDS) &&
+        (GetPlayersCountByTeam(ALLIANCE) < GetMaxPlayersPerTeam() || GetPlayersCountByTeam(HORDE) < GetMaxPlayersPerTeam()) &&
         m_BotFillGateHeldMs < BOT_FILL_GATE_HOLD_MS;
     if (holdForClones)
         m_BotFillGateHeldMs += diff;
