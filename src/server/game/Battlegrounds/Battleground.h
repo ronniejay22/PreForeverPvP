@@ -639,6 +639,13 @@ class TC_GAME_API Battleground
         // the clones are copies of (BattlegroundMgr::SetArenaLadderTeams).
         uint32 GetBotFillSide() const { return m_BotFillSide; }
         void SetBotFillSide(uint32 team) { m_BotFillSide = team; }
+        // Which match this is, never repeated while the realm is up. Instance
+        // ids are handed out again as soon as a match is gone, so something
+        // that finishes later - a clone loaded in the background - checks the
+        // serial it was asked for, not just the instance id, before it walks
+        // into whatever match holds that id by then.
+        uint32 GetMatchSerial() const { return m_MatchSerial; }
+        void SetMatchSerial(uint32 serial) { m_MatchSerial = serial; }
         // The other side of such a match, the people's team; else 0.
         uint32 GetBotFillRatedTeam() const
         {
@@ -1266,6 +1273,8 @@ class TC_GAME_API Battleground
         bool   m_IsBotFillRefused;                          // see IsBotFillRefused()
         bool   m_BotFillOpponentsFielded = false;           // see HasBotFillOpponentsFielded()
         uint32 m_BotFillSide = 0;                           // see GetBotFillSide()
+        uint32 m_MatchSerial = 0;                           // see GetMatchSerial()
+        uint32 m_BotFillGateHeldMs = 0;                     // see _ProcessJoin
         std::map<ObjectGuid, uint32> m_PreparationSeatTakers; // invited into a clone's seat -> team, see CountPreparationSeatsHeldByClones()
         uint32 m_BotFillSeatsOnTheWay[PVP_TEAMS_COUNT] = { }; // see SetBotFillSeatsOnTheWay()
         bool   m_IsTournamentPool;                         // made from the tournament queue pool, see IsTournamentPool()

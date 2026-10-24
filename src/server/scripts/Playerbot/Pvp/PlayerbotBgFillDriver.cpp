@@ -64,8 +64,10 @@ constexpr uint32 kQueueWakeIntervalMs = 2 * IN_MILLISECONDS;
 constexpr uint32 kOfflinePoolRefreshMs = 60 * IN_MILLISECONDS;
 // An offline copy is a background character load; if it has not produced a
 // clone in this long the request is presumed lost (the session carrying the
-// callback logged out, most likely) and the seat is tried again.
-constexpr uint32 kOfflineCloneTimeoutMs = 10 * IN_MILLISECONDS;
+// callback logged out, most likely) and the seat is tried again. As long as a
+// bot-filled arena's countdown: a busy database can take most of that, and a
+// request given up on too soon is only made twice.
+constexpr uint32 kOfflineCloneTimeoutMs = 30 * IN_MILLISECONDS;
 
 // Difficulty tiers, weakest first; the names are the config key segments.
 constexpr uint8 kTierCount = 3;
@@ -151,6 +153,9 @@ OfflinePool g_OfflinePool;
 struct PendingOfflineClone
 {
     uint32 instanceId = 0;
+    // Instance ids are handed out again; the serial says which match it was
+    // (Battleground::GetMatchSerial).
+    uint32 matchSerial = 0;
     uint32 team = 0;
     ObjectGuid sourceGuid;
     uint32 requestedMs = 0;
@@ -613,7 +618,8 @@ WorldSession* FindCallbackSession(MatchTally const& tally, TeamId preferredTeam)
 }
 
 // Drop pending offline requests that have produced their clone, timed out, or
-// belong to a match that no longer exists.
+// belong to a match that no longer exists - including one whose instance id a
+// newer match has been given since.
 void ReconcilePendingOfflineClones(uint32 nowMs)
 {
     for (auto itr = g_PendingOfflineClones.begin(); itr != g_PendingOfflineClones.end();)
@@ -621,7 +627,8 @@ void ReconcilePendingOfflineClones(uint32 nowMs)
         bool done = nowMs - itr->requestedMs >= kOfflineCloneTimeoutMs;
         if (!done)
         {
-            if (!sBattlegroundMgr->GetBattleground(itr->instanceId, BATTLEGROUND_TYPE_NONE))
+            Battleground const* bg = sBattlegroundMgr->GetBattleground(itr->instanceId, BATTLEGROUND_TYPE_NONE);
+            if (!bg || bg->GetMatchSerial() != itr->matchSerial)
                 done = true;
             else
             {
@@ -909,6 +916,7 @@ uint32 AddClonesToTeam(Battleground* bg, uint32 team, uint32 wanted, MatchTally 
 
             PendingOfflineClone pending;
             pending.instanceId = bg->GetInstanceID();
+            pending.matchSerial = bg->GetMatchSerial();
             pending.team = team;
             pending.sourceGuid = sourceGuid;
             pending.requestedMs = nowMs;
@@ -989,6 +997,7 @@ uint32 AddClonesToTeam(Battleground* bg, uint32 team, uint32 wanted, MatchTally 
 
             PendingOfflineClone pending;
             pending.instanceId = bg->GetInstanceID();
+            pending.matchSerial = bg->GetMatchSerial();
             pending.team = team;
             pending.sourceGuid = *sourceGuid;
             pending.requestedMs = nowMs;
@@ -1102,6 +1111,7 @@ uint32 AddClonesToTeam(Battleground* bg, uint32 team, uint32 wanted, MatchTally 
 
                 PendingOfflineClone pending;
                 pending.instanceId = instanceId;
+                pending.matchSerial = bg->GetMatchSerial();
                 pending.team = team;
                 pending.sourceGuid = sourceGuid;
                 pending.requestedMs = nowMs;

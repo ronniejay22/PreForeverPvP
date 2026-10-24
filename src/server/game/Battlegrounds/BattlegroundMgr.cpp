@@ -763,6 +763,7 @@ Battleground* BattlegroundMgr::CreateNewBattleground(BattlegroundTypeId original
 
     bg->SetBracket(bracketEntry);
     bg->SetInstanceID(sMapMgr->GenerateInstanceId());
+    bg->SetMatchSerial(++_lastMatchSerial);
     // Private matches still need a non-zero ID in status packets, but their
     // ID is never inserted into m_ClientBattlegroundIds and therefore never
     // appears in the public battleground list.

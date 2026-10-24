@@ -64,6 +64,8 @@
 namespace
 {
 constexpr uint32 NO_NON_VIRTUAL_HUMAN_END_DELAY_MS = 15000;
+// The longest a bot-filled arena's gates wait for clones still loading.
+constexpr uint32 BOT_FILL_GATE_HOLD_MS = 30000;
 
 bool HasAnyNonVirtualHumanParticipant(Battleground const* battleground)
 {
@@ -916,11 +918,22 @@ inline void Battleground::_ProcessJoin(uint32 diff)
     // *********************************************************
     // ***           BATTLEGROUND STARTING SYSTEM            ***
     // *********************************************************
+    // A bot-filled arena also holds its gates, at the last second of the
+    // countdown, for clones the bot fill is still loading in the background
+    // (SetBotFillSeatsOnTheWay) - BOT_FILL_GATE_HOLD_MS at most in all. A slow
+    // load then costs a short wait, instead of gates that open on a side still
+    // on its way and hand the match to the other one.
+    bool const holdForClones = isArena() && IsBotFillMatch() && GetStartDelayTime() <= int32(IN_MILLISECONDS) &&
+        m_BotFillSeatsOnTheWay[TEAM_ALLIANCE] + m_BotFillSeatsOnTheWay[TEAM_HORDE] != 0 &&
+        m_BotFillGateHeldMs < BOT_FILL_GATE_HOLD_MS;
+    if (holdForClones)
+        m_BotFillGateHeldMs += diff;
+
     // Somebody invited into a clone's seat is still deciding or still loading
     // in. The gates wait for them; HandOverPreparationSeat restarts the
     // countdown when they arrive, and an invite left to lapse lets it run on.
     PrunePreparationSeatTakers();
-    if (m_PreparationSeatTakers.empty())
+    if (m_PreparationSeatTakers.empty() && !holdForClones)
         ModifyStartDelayTime(diff);
 
     if (m_ResetStatTimer > 5000)
@@ -2149,6 +2162,7 @@ void Battleground::Reset()
     m_NoNonVirtualHumanElapsed = 0;
     m_BotFillOpponentsFielded = false;
     m_BotFillSide = 0;
+    m_BotFillGateHeldMs = 0;
     m_PreparationSeatTakers.clear();
     m_SquadSeats.clear();
     m_WinnerSquad = BATTLEGROUND_NO_SQUAD;

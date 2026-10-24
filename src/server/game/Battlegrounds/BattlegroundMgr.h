@@ -325,6 +325,7 @@ class TC_GAME_API BattlegroundMgr
         BattlegroundMapTemplateContainer _battlegroundMapTemplates;
         BotFillPolicy _botFillPolicy;
         std::vector<uint32> _arenaLadderTeams;              // see SetArenaLadderTeams()
+        uint32 _lastMatchSerial = 0;                        // see Battleground::GetMatchSerial()
 
         struct MatchDurationSample
         {

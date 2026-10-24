@@ -1870,15 +1870,24 @@ bool PlayerbotObcCloneManager::QueueCustomGameClone(ObjectGuid sourceGuid, World
     }
 
     uint32 const battlegroundInstanceId = bg->GetInstanceID();
+    uint32 const matchSerial = bg->GetMatchSerial();
     BattlegroundTypeId const battlegroundType = bg->GetTypeID();
     SQLQueryHolderCallback& callback = callbackSession->AddQueryHolderCallback(CharacterDatabase.DelayQueryHolder(holder));
-    callback.AfterComplete([sourceGuid, battlegroundInstanceId, battlegroundType, team, displayPrefix](SQLQueryHolderBase const& queryHolder)
+    callback.AfterComplete([sourceGuid, battlegroundInstanceId, matchSerial, battlegroundType, team, displayPrefix](SQLQueryHolderBase const& queryHolder)
     {
+        // The match it was asked for, not a later one handed the same
+        // instance id while the load was on its way.
         Battleground* targetBg = sBattlegroundMgr->GetBattleground(battlegroundInstanceId, battlegroundType);
-        if (!targetBg)
+        if (!targetBg || targetBg->GetMatchSerial() != matchSerial)
             return;
 
-        if (targetBg->GetStatus() != STATUS_NONE && targetBg->GetStatus() != STATUS_WAIT_LEAVE)
+        // A bot-filled arena takes its clones behind the gates and no more
+        // than a side holds: one that loaded too slowly for its seat (the bot
+        // fill has asked again by then, or the gates are open) is not seated.
+        bool const arenaSeatGone = targetBg->isArena() && targetBg->IsBotFillMatch() &&
+            (targetBg->GetStatus() != STATUS_WAIT_JOIN || targetBg->GetPlayersCountByTeam(team) >= targetBg->GetMaxPlayersPerTeam());
+
+        if (!arenaSeatGone && targetBg->GetStatus() != STATUS_NONE && targetBg->GetStatus() != STATUS_WAIT_LEAVE)
         {
             if (Player* onlineSource = ObjectAccessor::FindConnectedPlayer(sourceGuid))
                 PlayerbotObcCloneManager::CreateCustomGameClone(onlineSource, targetBg, team, displayPrefix);
