@@ -30,6 +30,7 @@
 #include "Miscellaneous/TournamentMode.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
+#include "Random.h"
 #include "WorldSession.h"
 #include "World.h"
 
@@ -82,6 +83,46 @@ bool GroupAllowsArenaBotFill(GroupQueueInfo const* ginfo)
     }
 
     return true;
+}
+
+// The bot ladder team (BattlegroundMgr::SetArenaLadderTeams) a rated team the
+// queue gives clones to plays: one of the few nearest its matchmaker rating,
+// at random, so the opponents rotate - and the one it played last only when
+// there is nobody else. A ladder team already in a match sits this one out.
+ArenaTeam* PickArenaLadderOpponent(GroupQueueInfo const* ginfo, uint8 arenaType)
+{
+    constexpr std::size_t NEAREST = 3;
+
+    struct Candidate
+    {
+        ArenaTeam* team;
+        uint32 distance;
+    };
+    std::vector<Candidate> candidates;
+    for (uint32 teamId : sBattlegroundMgr->GetArenaLadderTeams())
+    {
+        ArenaTeam* team = sArenaTeamMgr->GetArenaTeamById(teamId);
+        if (!team || team->GetType() != arenaType || teamId == ginfo->ArenaTeamId || sBattlegroundMgr->IsArenaTeamInMatch(teamId))
+            continue;
+
+        int32 const distance = int32(team->GetRosterAverageMMR()) - int32(ginfo->ArenaMatchmakerRating);
+        candidates.push_back({ team, uint32(std::abs(distance)) });
+    }
+
+    if (candidates.size() > 1)
+        candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [ginfo](Candidate const& candidate)
+        {
+            return candidate.team->GetId() == ginfo->PreviousOpponentsTeamId;
+        }), candidates.end());
+
+    if (candidates.empty())
+        return nullptr;
+
+    std::sort(candidates.begin(), candidates.end(), [](Candidate const& left, Candidate const& right)
+    {
+        return left.distance < right.distance;
+    });
+    return candidates[urand(0, uint32(std::min(candidates.size(), NEAREST)) - 1)].team;
 }
 
 // Two rated teams the stock pairing may put together. Whole teams always can.
@@ -2474,10 +2515,12 @@ void BattlegroundQueue::UpdateRatedPool(BattlegroundTypeId bgTypeId, PvPDifficul
 
 // A rated team the stock pairing found no real opponent for plays clones once it
 // has waited the rated bot-fill wait - the same match a skirmish would be, on
-// the same bot-safe arenas, padded by the same driver. The clones are no arena
-// team: their side's team id stays 0, which is what tells the end of the match
-// (Battleground::GetBotFillRatedTeam) to score the team against an opponent of
-// its own matchmaker rating.
+// the same bot-safe arenas, padded by the same driver. Where there is a bot
+// ladder the clones' side is one of its teams (PickArenaLadderOpponent): the
+// clones are copies of that team's members, and both teams are rated against
+// each other. Without one the clones are no team, and the people's team is
+// scored against an opponent of its own matchmaker rating
+// (Arena::EndBotFilledRatedMatch).
 //
 // Collected before any team is invited, as TryStartBotFilledMatch does.
 void BattlegroundQueue::StartBotFilledRatedMatches(BattlegroundTypeId bgTypeId, PvPDifficultyEntry const* bracketEntry,
@@ -2528,17 +2571,23 @@ void BattlegroundQueue::StartBotFilledRatedMatches(BattlegroundTypeId bgTypeId, 
         uint32 const side = ginfo->Team == HORDE ? HORDE : ALLIANCE;
         uint32 const clones = side == ALLIANCE ? HORDE : ALLIANCE;
 
-        // What a declined invite is charged against (RemovePlayer)
-        ginfo->OpponentsTeamRating = ginfo->ArenaTeamRating;
-        ginfo->OpponentsMatchmakerRating = ginfo->ArenaMatchmakerRating;
+        ArenaTeam* ladder = PickArenaLadderOpponent(ginfo, arenaType);
+        uint32 const cloneMatchmakerRating = ladder ? ladder->GetRosterAverageMMR() : ginfo->ArenaMatchmakerRating;
 
+        // What a declined invite is charged against (RemovePlayer)
+        ginfo->OpponentsTeamRating = ladder ? ladder->GetRating() : ginfo->ArenaTeamRating;
+        ginfo->OpponentsMatchmakerRating = cloneMatchmakerRating;
+
+        arena->SetBotFillSide(clones);
+        if (ladder)
+            arena->SetArenaTeamIdForTeam(clones, ladder->GetId());
         arena->SetArenaMatchmakerRating(side, ginfo->ArenaMatchmakerRating);
-        arena->SetArenaMatchmakerRating(clones, ginfo->ArenaMatchmakerRating);
+        arena->SetArenaMatchmakerRating(clones, cloneMatchmakerRating);
         InviteGroupToBG(ginfo, arena, side);
 
-        TC_LOG_DEBUG("bg.battleground", "BattlegroundQueue::StartBotFilledRatedMatches: rated {}v{} instance {} for arena team {} ({} real, mmr {}) against clones.",
+        TC_LOG_DEBUG("bg.battleground", "BattlegroundQueue::StartBotFilledRatedMatches: rated {}v{} instance {} for arena team {} ({} real, mmr {}) against {} (mmr {}).",
             uint32(arenaType), uint32(arenaType), arena->GetInstanceID(), ginfo->ArenaTeamId, uint32(ginfo->Players.size()),
-            ginfo->ArenaMatchmakerRating);
+            ginfo->ArenaMatchmakerRating, ladder ? ladder->GetName() : std::string("clones"), cloneMatchmakerRating);
 
         arena->StartBattleground();
         arena->RemoveFromBGFreeSlotQueue();

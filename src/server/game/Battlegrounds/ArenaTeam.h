@@ -137,6 +137,9 @@ class TC_GAME_API ArenaTeam
 
         uint32 GetRating() const          { return Stats.Rating; }
         uint32 GetAverageMMR(Group* group) const;
+        // The whole roster's matchmaker rating, online or not: for a team that
+        // never queues as a group of its own (the playerbot module's ladder).
+        uint32 GetRosterAverageMMR() const;
 
         void SetCaptain(ObjectGuid guid);
         bool SetName(std::string const& name);
@@ -179,6 +182,8 @@ class TC_GAME_API ArenaTeam
         int32 LostAgainst(uint32 Own_MMRating, uint32 Opponent_MMRating, int32& rating_change);
         void MemberLost(Player* player, uint32 againstMatchmakerRating, int32 MatchmakerRatingChange = -12);
         void OfflineMemberLost(ObjectGuid guid, uint32 againstMatchmakerRating, int32 MatchmakerRatingChange = -12);
+        // MemberWon for somebody who is not online to be handed it.
+        void OfflineMemberWon(ObjectGuid guid, uint32 againstMatchmakerRating, int32 MatchmakerRatingChange);
 
         // A rated match of more than two teams (Baradin Hold: Four Corners). The
         // result is read against every other team in finishing order - Score 1

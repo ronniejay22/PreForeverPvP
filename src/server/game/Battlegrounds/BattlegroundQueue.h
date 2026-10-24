@@ -168,7 +168,8 @@ class TC_GAME_API BattlegroundQueue
             BattlegroundBracketId bracket_id, uint8 arenaType, uint32 arenaRating);
         // What UpdateRatedPool could not pair, once it has waited the rated
         // bot-fill wait: each team gets a rated match of its own against
-        // clones, which count as an opponent of the team's own rating.
+        // clones - copies of a bot ladder team's members, where there is a
+        // ladder, else an opponent of the team's own rating.
         void StartBotFilledRatedMatches(BattlegroundTypeId bgTypeId, PvPDifficultyEntry const* bracketEntry,
             BattlegroundBracketId bracket_id, uint8 arenaType);
         // After ginfo->Team has been switched: moves the group to that side's

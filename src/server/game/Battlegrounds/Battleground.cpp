@@ -2086,9 +2086,10 @@ void Battleground::RemovePlayerAtLeave(ObjectGuid guid, bool Transport, bool Sen
         // A rated arena padded with bots is its people's to play. When the last
         // of them is gone from a side with an arena team - walked out, or dropped
         // and not back before the offline timer gave up - that team forfeits,
-        // instead of its clones winning or losing its rating for it. RemovePlayer
+        // instead of its clones winning or losing its rating for it. The clones'
+        // own side (a bot ladder team) never had anybody to lose. RemovePlayer
         // above may already have ended the match (the side had nobody alive).
-        else if (isArena() && isRated() && IsBotFillMatch() && GetArenaTeamIdForTeam(team) &&
+        else if (isArena() && isRated() && IsBotFillMatch() && GetArenaTeamIdForTeam(team) && team != GetBotFillSide() &&
             (GetStatus() == STATUS_IN_PROGRESS || GetStatus() == STATUS_WAIT_JOIN) &&
             !HasPersonOnTeam(team))
         {
@@ -2147,6 +2148,7 @@ void Battleground::Reset()
     m_HasEverHadNonVirtualHumanParticipant = false;
     m_NoNonVirtualHumanElapsed = 0;
     m_BotFillOpponentsFielded = false;
+    m_BotFillSide = 0;
     m_PreparationSeatTakers.clear();
     m_SquadSeats.clear();
     m_WinnerSquad = BATTLEGROUND_NO_SQUAD;
@@ -2422,9 +2424,9 @@ void Battleground::AddPlayer(Player* player)
     // Add to list/maps
     m_Players[player->GetGUID()] = bp;
 
-    // The first clone seated opposite the team of a rated bot match is what
+    // The first clone seated on the clones' side of a rated bot match is what
     // makes it a contest (Arena::EndBotFilledRatedMatch).
-    if (uint32 const ratedTeam = GetBotFillRatedTeam(); ratedTeam && team != ratedTeam && IsBotParticipantSession(player->GetSession()))
+    if (GetBotFillRatedTeam() && team == m_BotFillSide && IsBotParticipantSession(player->GetSession()))
         m_BotFillOpponentsFielded = true;
 
     if (IsSquadMatch())

@@ -231,6 +231,50 @@ Playerbot.BgFill.RatedArena.QueueWaitSeconds = 30
 
 Playerbot.BgFill.RatedArena.AutoCreateTeam = 1
 
+#    Playerbot.BgFill.RatedArena.Ladder.Enable
+#        Description: A ladder of bot arena teams. Arena teams are made of the level-cap characters
+#                     on Playerbot.Pve.PvpOnlyAccountIds, and a rated team the queue gives clones
+#                     to plays one of them instead of nameless clones: one of the three nearest its
+#                     matchmaker rating, at random, and not the one it played last while there is
+#                     anybody else, so the opponents rotate. The clones on that side are copies of
+#                     that team's members, and both teams are rated. The teams start at the same
+#                     rating as anybody else and play each other on paper between real games
+#                     (Ladder.SimulateMinutes). A ladder team is any arena team whose captain is one
+#                     of those characters; teams are only ever added, so turning this off just stops
+#                     the queue from using them. `.arena ladder [2|3|4|5]` shows the standings.
+#                     Needs RatedArena.Enable.
+#        Default:     0 - (Disabled, rated teams play nameless clones)
+#                     1 - (Enabled)
+
+Playerbot.BgFill.RatedArena.Ladder.Enable = 0
+
+#    Playerbot.BgFill.RatedArena.Ladder.Teams2v2
+#    Playerbot.BgFill.RatedArena.Ladder.Teams3v3
+#    Playerbot.BgFill.RatedArena.Ladder.Teams4v4
+#    Playerbot.BgFill.RatedArena.Ladder.Teams5v5
+#        Description: Teams of each size the ladder keeps. Missing ones are made at startup and on
+#                     .reload config, each with the healers SkirmishArena.HealersPerTeam* asks for
+#                     and every class once while there is a choice. A character is on one team of a
+#                     size at most, so the number of level-cap PvP-only bots caps each size.
+#        Default:     12, 9, 6, 6
+
+Playerbot.BgFill.RatedArena.Ladder.Teams2v2 = 12
+Playerbot.BgFill.RatedArena.Ladder.Teams3v3 = 9
+Playerbot.BgFill.RatedArena.Ladder.Teams4v4 = 6
+Playerbot.BgFill.RatedArena.Ladder.Teams5v5 = 6
+
+#    Playerbot.BgFill.RatedArena.Ladder.SimulateMinutes
+#        Description: Every this many minutes each size plays one game on paper: a ladder team at
+#                     random against one of the three nearest it, neither of them in a real match.
+#                     The winner is rolled from the stock Elo chance on their matchmaker ratings,
+#                     with a team of the hard tier (Playerbot.BgFill.Tier.*) counted 150 above its
+#                     rating and one of the easy tier 150 below, so the stronger rosters climb. Both
+#                     teams and their members are rated as a real game would rate them.
+#        Default:     5
+#                     0 - (the ladder's teams only play rated teams)
+
+Playerbot.BgFill.RatedArena.Ladder.SimulateMinutes = 5
+
 #    Playerbot.BgFill.MaxPerTeam
 #        Description: Team size the clones fill up to, capped by the battleground's own maximum
 #                     (so 10 for Warsong Gulch whatever this says). Real players are always

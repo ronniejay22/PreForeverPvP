@@ -1097,6 +1097,8 @@ public:
         playerbot::PlayerbotBgFillDriver::LoadConfig();
         playerbot::PveManager::LoadConfig();
         LoadPlayerbotGoldGainMultiplier();
+        // after PveManager: the ladder's teams come from its PvP-only accounts
+        playerbot::PlayerbotBgFillDriver::OnStartup();
         playerbot::PvpCoreConfig const& config = playerbot::PvpCore::GetConfig();
         playerbot::RandomBotPopulationSnapshot const population = playerbot::RandomBotParticipationManager::GetPopulationSnapshot();
 

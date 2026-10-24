@@ -632,19 +632,21 @@ class TC_GAME_API Battleground
             return !TakesSeatsInPreparationOnly() || (!IsBotFillMatch() && GetStatus() == STATUS_WAIT_JOIN);
         }
         void SetBotFillMatch(bool enabled) { m_IsBotFillMatch = enabled; }
-        // A rated arena the queue gave one arena team to play against clones
-        // (BattlegroundQueue::StartBotFilledRatedMatches): the side that has
-        // the team, ALLIANCE or HORDE, else 0 - two real teams paired
-        // short-handed are both teams and are rated as stock.
+        // The side of a rated arena the queue gave to clones (BattlegroundQueue::
+        // StartBotFilledRatedMatches), ALLIANCE or HORDE; 0 everywhere else -
+        // two real teams paired short-handed are both people's. The clones'
+        // side holds no arena team, or a team of the bot ladder whose members
+        // the clones are copies of (BattlegroundMgr::SetArenaLadderTeams).
+        uint32 GetBotFillSide() const { return m_BotFillSide; }
+        void SetBotFillSide(uint32 team) { m_BotFillSide = team; }
+        // The other side of such a match, the people's team; else 0.
         uint32 GetBotFillRatedTeam() const
         {
-            if (!isArena() || !isRated() || !IsBotFillMatch() || IsSquadMatch())
+            if (!isArena() || !isRated() || !IsBotFillMatch() || IsSquadMatch() || !m_BotFillSide)
                 return 0;
-            bool const alliance = m_ArenaTeamIds[TEAM_ALLIANCE] != 0;
-            bool const horde = m_ArenaTeamIds[TEAM_HORDE] != 0;
-            return alliance == horde ? 0 : (alliance ? ALLIANCE : HORDE);
+            return m_BotFillSide == ALLIANCE ? uint32(HORDE) : uint32(ALLIANCE);
         }
-        // Whether a clone has ever been seated opposite that team; until one
+        // Whether a clone has ever been seated on the clones' side; until one
         // has, the match is no contest and its result counts for nothing.
         bool HasBotFillOpponentsFielded() const { return m_BotFillOpponentsFielded; }
         // Whether a person - not a bot - still holds a seat on `team`; one who
@@ -1263,6 +1265,7 @@ class TC_GAME_API Battleground
         bool   m_IsBotFillMatch;                            // padded with transient clones, see IsBotFillMatch()
         bool   m_IsBotFillRefused;                          // see IsBotFillRefused()
         bool   m_BotFillOpponentsFielded = false;           // see HasBotFillOpponentsFielded()
+        uint32 m_BotFillSide = 0;                           // see GetBotFillSide()
         std::map<ObjectGuid, uint32> m_PreparationSeatTakers; // invited into a clone's seat -> team, see CountPreparationSeatsHeldByClones()
         uint32 m_BotFillSeatsOnTheWay[PVP_TEAMS_COUNT] = { }; // see SetBotFillSeatsOnTheWay()
         bool   m_IsTournamentPool;                         // made from the tournament queue pool, see IsTournamentPool()

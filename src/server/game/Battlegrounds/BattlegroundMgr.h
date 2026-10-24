@@ -27,6 +27,7 @@
 #include <set>
 #include <tuple>
 #include <unordered_map>
+#include <vector>
 
 struct BattlemasterListEntry;
 
@@ -180,6 +181,17 @@ class TC_GAME_API BattlegroundMgr
         }
         uint32 GetBotFillRatedArenaQueueWaitMs() const { return _botFillPolicy.ratedArenaQueueWaitMs; }
 
+        // The bot ladder (Playerbot.BgFill.RatedArena.Ladder): arena teams of
+        // bot characters, kept by the playerbot module. A rated team the queue
+        // gives clones to plays one of these - its clones are copies of that
+        // team's members, and both teams are rated - instead of anonymous
+        // clones. Empty = no ladder: the clones are no team.
+        void SetArenaLadderTeams(std::vector<uint32> teamIds) { _arenaLadderTeams = std::move(teamIds); }
+        std::vector<uint32> const& GetArenaLadderTeams() const { return _arenaLadderTeams; }
+        bool IsArenaLadderTeam(uint32 arenaTeamId) const;
+        // Whether an arena team is seated in an arena that has not ended yet.
+        bool IsArenaTeamInMatch(uint32 arenaTeamId) const;
+
         static BattlegroundQueueTypeId BGQueueTypeId(BattlegroundTypeId bgTypeId, uint8 arenaType);
         static BattlegroundTypeId BGTemplateId(BattlegroundQueueTypeId bgQueueTypeId);
         static uint8 BGArenaType(BattlegroundQueueTypeId bgQueueTypeId);
@@ -312,6 +324,7 @@ class TC_GAME_API BattlegroundMgr
         BattlegroundTemplateMap _battlegroundTemplates;
         BattlegroundMapTemplateContainer _battlegroundMapTemplates;
         BotFillPolicy _botFillPolicy;
+        std::vector<uint32> _arenaLadderTeams;              // see SetArenaLadderTeams()
 
         struct MatchDurationSample
         {

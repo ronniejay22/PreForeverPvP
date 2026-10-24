@@ -1191,6 +1191,25 @@ bool BattlegroundMgr::IsBotFillSkirmishArena(uint8 arenaType) const
         arenaType == ARENA_TYPE_4v4 || arenaType == ARENA_TYPE_5v5;
 }
 
+bool BattlegroundMgr::IsArenaLadderTeam(uint32 arenaTeamId) const
+{
+    return arenaTeamId && std::find(_arenaLadderTeams.begin(), _arenaLadderTeams.end(), arenaTeamId) != _arenaLadderTeams.end();
+}
+
+bool BattlegroundMgr::IsArenaTeamInMatch(uint32 arenaTeamId) const
+{
+    if (!arenaTeamId)
+        return false;
+
+    if (BattlegroundContainer const* arenas = GetBattlegroundsByType(BATTLEGROUND_AA))
+        for (auto const& [instanceId, arena] : *arenas)
+            if (instanceId && arena && arena->isRated() && arena->GetStatus() < STATUS_WAIT_LEAVE &&
+                (arena->GetArenaTeamIdForTeam(ALLIANCE) == arenaTeamId || arena->GetArenaTeamIdForTeam(HORDE) == arenaTeamId))
+                return true;
+
+    return false;
+}
+
 bool BattlegroundMgr::IsBotFillRatedArena(uint8 arenaType) const
 {
     if (!IsBotFillRatedArenaEnabled())

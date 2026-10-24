@@ -528,10 +528,12 @@ void Arena::RemovePlayerAtLeave(ObjectGuid guid, bool transport, bool sendPacket
             ArenaTeam* loserArenaTeam = sArenaTeamMgr->GetArenaTeamById(GetArenaTeamIdForTeam(team));
 
             // left a rated match while the encounter was in progress, consider as loser
-            // - against clones as well, which stand for an opponent of the team's
-            // own rating (EndBotFilledRatedMatch), once there are any to fight
-            if ((winnerArenaTeam && loserArenaTeam && winnerArenaTeam != loserArenaTeam) ||
-                (loserArenaTeam && team == GetBotFillRatedTeam() && HasBotFillOpponentsFielded()))
+            // - against clones as well (EndBotFilledRatedMatch), once there are any
+            // to fight; the clones' own side is never charged for one of them
+            bool const lost = GetBotFillSide()
+                ? loserArenaTeam && team == GetBotFillRatedTeam() && HasBotFillOpponentsFielded()
+                : winnerArenaTeam && loserArenaTeam && winnerArenaTeam != loserArenaTeam;
+            if (lost)
             {
                 if (Player* player = _GetPlayer(itr->first, itr->second.OfflineRemoveTime != 0, "Arena::RemovePlayerAtLeave"))
                     loserArenaTeam->MemberLost(player, GetArenaMatchmakerRating(GetOtherTeam(team)));
@@ -1079,11 +1081,16 @@ void Arena::EndBattleground(uint32 winner)
     Battleground::EndBattleground(winner);
 }
 
-// The stock calculation above, for a match with one arena team in it. The
-// clones' side was given the team's own matchmaker rating when the queue made
-// the match (BattlegroundQueue::StartBotFilledRatedMatches), so a win or a loss
-// moves the team as one against an even opponent would; the time limit is the
-// stock draw. Previous opponents are left alone - there is no team to avoid.
+// The stock calculation above, for a match the people's team played against
+// clones. The clones' side is one of two things (BattlegroundQueue::
+// StartBotFilledRatedMatches):
+//  - a team of the bot ladder, whose members the clones were copies of: the
+//    two teams are rated against each other as stock rates two teams, the bot
+//    team's members as members who were not there to be handed it;
+//  - no team at all: it was given the people's own matchmaker rating, so a win
+//    or a loss moves them as one against an even opponent would, and there is
+//    no previous opponent to remember.
+// The time limit is the stock draw.
 //
 // No contest - no rating change for anybody - when the team never had a clone
 // to fight (the gates opened on an empty side, which CheckWinConditions would
@@ -1095,6 +1102,8 @@ void Arena::EndBotFilledRatedMatch(uint32 winner)
     uint32 const team = GetBotFillRatedTeam();
     uint32 const clones = GetOtherTeam(team);
     ArenaTeam* arenaTeam = sArenaTeamMgr->GetArenaTeamById(GetArenaTeamIdForTeam(team));
+    ArenaTeam* botTeam = sArenaTeamMgr->GetArenaTeamById(GetArenaTeamIdForTeam(clones));
+    std::string const botTeamName = botTeam ? botTeam->GetName() : std::string("Bot Team");
 
     // bg team that the client expects is different to TeamId: alliance 1, horde 0
     uint8 const teamScore = team == ALLIANCE ? PVP_TEAM_ALLIANCE : PVP_TEAM_HORDE;
@@ -1110,7 +1119,7 @@ void Arena::EndBotFilledRatedMatch(uint32 winner)
     if (!arenaTeam || !HasBotFillOpponentsFielded() || (!won && !lost && !draw))
     {
         _arenaTeamScores[teamScore].Assign(0, ownMatchmakerRating, arenaTeam ? arenaTeam->GetName() : "");
-        _arenaTeamScores[cloneScore].Assign(0, cloneMatchmakerRating, "Bot Team");
+        _arenaTeamScores[cloneScore].Assign(0, cloneMatchmakerRating, botTeamName);
         TC_LOG_WARN("bg.arena", "Arena::EndBotFilledRatedMatch: instance {} arena team {} - no contest (winner {}, opponents fielded {}); no rating change.",
             GetInstanceID(), GetArenaTeamIdForTeam(team), winner, HasBotFillOpponentsFielded() ? "yes" : "no");
         return;
@@ -1130,18 +1139,50 @@ void Arena::EndBotFilledRatedMatch(uint32 winner)
 
     SetArenaMatchmakerRating(team, ownMatchmakerRating + matchmakerChange);
     _arenaTeamScores[teamScore].Assign(ratingChange, ownMatchmakerRating, arenaTeam->GetName());
-    _arenaTeamScores[cloneScore].Assign(0, cloneMatchmakerRating, "Bot Team");
 
-    TC_LOG_DEBUG("bg.arena", "Arena::EndBotFilledRatedMatch: {}v{} instance {} arena team {} {} against clones: rating {:+}, MMR {} {:+}.",
+    int32 botRatingChange = 0;
+    if (botTeam)
+    {
+        int32 botMatchmakerChange = 0;
+        if (won)
+            botMatchmakerChange = botTeam->LostAgainst(cloneMatchmakerRating, ownMatchmakerRating, botRatingChange);
+        else if (lost)
+            botMatchmakerChange = botTeam->WonAgainst(cloneMatchmakerRating, ownMatchmakerRating, botRatingChange);
+        else
+        {
+            botRatingChange = ARENA_TIMELIMIT_POINTS_LOSS;
+            botTeam->FinishGame(ARENA_TIMELIMIT_POINTS_LOSS);
+        }
+
+        std::vector<ObjectGuid> botMembers;
+        for (auto itr = botTeam->m_membersBegin(); itr != botTeam->m_membersEnd(); ++itr)
+            botMembers.push_back(itr->Guid);
+        for (ObjectGuid const& member : botMembers)
+        {
+            if (lost)
+                botTeam->OfflineMemberWon(member, ownMatchmakerRating, botMatchmakerChange);
+            else
+                botTeam->OfflineMemberLost(member, ownMatchmakerRating, botMatchmakerChange);
+        }
+
+        SetArenaMatchmakerRating(clones, cloneMatchmakerRating + botMatchmakerChange);
+        arenaTeam->SetPreviousOpponents(botTeam->GetId());
+        botTeam->SetPreviousOpponents(arenaTeam->GetId());
+        botTeam->SaveToDB();
+        botTeam->NotifyStatsChanged();
+    }
+    _arenaTeamScores[cloneScore].Assign(botRatingChange, cloneMatchmakerRating, botTeamName);
+
+    TC_LOG_DEBUG("bg.arena", "Arena::EndBotFilledRatedMatch: {}v{} instance {} arena team {} {} against {}: rating {:+} / {:+}, MMR {} {:+}.",
         GetArenaType(), GetArenaType(), GetInstanceID(), arenaTeam->GetId(), won ? "won" : lost ? "lost" : "drew",
-        ratingChange, ownMatchmakerRating, matchmakerChange);
+        botTeamName, ratingChange, botRatingChange, ownMatchmakerRating, matchmakerChange);
 
     uint8 const aliveWinners = won ? GetArenaAlivePlayersCountByTeam(team) : 0;
 
     for (auto const& [guid, participant] : GetPlayers())
     {
         if (participant.Team != team)
-            continue;                               // the clones are in no team
+            continue;                               // the clones - their team, if any, is rated above
 
         if (participant.OfflineRemoveTime)
         {
@@ -1149,8 +1190,9 @@ void Arena::EndBotFilledRatedMatch(uint32 winner)
             continue;
         }
 
+        // a clone dealt in beside the people is in no team and earns nothing
         Player* player = _GetPlayer(guid, false, "Arena::EndBotFilledRatedMatch");
-        if (!player)
+        if (!player || IsBotParticipantSession(player->GetSession()))
             continue;
 
         if (won)

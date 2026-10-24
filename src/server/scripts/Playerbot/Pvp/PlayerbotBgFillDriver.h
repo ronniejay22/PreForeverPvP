@@ -66,6 +66,11 @@ public:
     // BattlegroundMgr. Safe on .reload config.
     static void LoadConfig();
 
+    // Once the world is up (arena teams are loaded by then): makes the bot
+    // ladder's teams the config asks for and hands them to the queue. Later
+    // config reloads redo it from LoadConfig.
+    static void OnStartup();
+
     static void OnWorldUpdate(uint32 diffMs);
 };
 }

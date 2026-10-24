@@ -125,8 +125,9 @@ class TC_GAME_API Arena : public Battleground
         // A rated squad match's ratings, by finishing place (ArenaTeam::PlacedAgainst).
         void EndRatedSquadMatch();
         // A rated match one arena team played against clones (Battleground::
-        // GetBotFillRatedTeam): the team is rated against an opponent of its
-        // own matchmaker rating, which is what the queue gave the clones' side.
+        // GetBotFillRatedTeam): rated against the bot ladder team the clones
+        // were copies of, or, with no ladder team, against an opponent of its
+        // own matchmaker rating.
         void EndBotFilledRatedMatch(uint32 winner);
         // One "N Players Remaining" line per squad (ARENA_WORLD_STATE_SQUAD_*),
         // for every squad that is in the match.

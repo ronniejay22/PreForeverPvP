@@ -675,6 +675,18 @@ uint32 ArenaTeam::GetAverageMMR(Group* group) const
     return matchMakerRating;
 }
 
+uint32 ArenaTeam::GetRosterAverageMMR() const
+{
+    if (Members.empty())
+        return sWorld->getIntConfig(CONFIG_ARENA_START_MATCHMAKER_RATING);
+
+    uint32 matchMakerRating = 0;
+    for (ArenaTeamMember const& member : Members)
+        matchMakerRating += member.MatchMakerRating;
+
+    return matchMakerRating / uint32(Members.size());
+}
+
 float ArenaTeam::GetChanceAgainst(uint32 ownRating, uint32 opponentRating)
 {
     // Returns the chance to win against a team with the given rating, used in the rating adjustment calculation
@@ -843,6 +855,29 @@ void ArenaTeam::OfflineMemberLost(ObjectGuid guid, uint32 againstMatchmakerRatin
             // update personal played stats
             itr->WeekGames += 1;
             itr->SeasonGames += 1;
+            return;
+        }
+    }
+}
+
+void ArenaTeam::OfflineMemberWon(ObjectGuid guid, uint32 againstMatchmakerRating, int32 MatchmakerRatingChange)
+{
+    for (MemberList::iterator itr = Members.begin(); itr != Members.end(); ++itr)
+    {
+        if (itr->Guid == guid)
+        {
+            // update personal rating
+            int32 mod = GetRatingMod(itr->PersonalRating, againstMatchmakerRating, true);
+            itr->ModifyPersonalRating(nullptr, mod, GetType());
+
+            // update matchmaker rating
+            itr->ModifyMatchmakerRating(MatchmakerRatingChange, GetSlot());
+
+            // update personal stats
+            itr->WeekGames += 1;
+            itr->SeasonGames += 1;
+            itr->SeasonWins += 1;
+            itr->WeekWins += 1;
             return;
         }
     }

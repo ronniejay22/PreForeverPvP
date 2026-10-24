@@ -18,9 +18,12 @@
 #include "PlayerbotBgFillDriver.h"
 
 #include "Arena.h"
+#include "ArenaTeam.h"
+#include "ArenaTeamMgr.h"
 #include "Battleground.h"
 #include "BattlegroundMgr.h"
 #include "BattlegroundQueue.h"
+#include "CharacterCache.h"
 #include "Configuration/Config.h"
 #include "Containers.h"
 #include "DataStores/DBCStores.h"
@@ -28,6 +31,7 @@
 #include "GameTime.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "PlayerbotObcClone.h"
 #include "Playerbot/Pve/PlayerbotPveManager.h"
@@ -37,8 +41,10 @@
 #include "Random.h"
 #include "SharedDefines.h"
 #include "StringConvert.h"
+#include "StringFormat.h"
 #include "Timer.h"
 #include "Util.h"
+#include "World.h"
 #include "WorldSession.h"
 
 #include <algorithm>
@@ -78,6 +84,11 @@ struct BgFillConfig
     bool ratedArenasEnabled = false;
     uint32 ratedArenaQueueWaitMs = 30 * IN_MILLISECONDS;
     bool ratedArenaAutoCreateTeam = true;
+    // Playerbot.BgFill.RatedArena.Ladder.*: arena teams of the level-cap
+    // PvP-only bots for rated teams to play (see SyncArenaLadder).
+    bool ladderEnabled = false;
+    std::array<uint32, ARENA_TYPE_5v5 + 1> ladderTeams = {};   // by arena type
+    uint32 ladderSimulateMs = 5 * MINUTE * IN_MILLISECONDS;
     uint32 maxPerTeam = 15;
     uint32 clonesPerTick = 2;
     bool useOfflineBots = true;
@@ -108,6 +119,10 @@ struct BgFillConfig
 BgFillConfig g_Config;
 uint32 g_TickAccumulatorMs = 0;
 uint32 g_QueueWakeAccumulatorMs = 0;
+uint32 g_LadderSimulateAccumulatorMs = 0;
+// Arena teams are loaded long after the first config load; the ladder is only
+// synced from OnStartup on.
+bool g_WorldStarted = false;
 
 // Offline characters on the managed-bot accounts, refreshed at most once a
 // minute and only when a match actually runs out of online bots to copy.
@@ -813,6 +828,8 @@ Optional<ObjectGuid> DrawSource(SourceDeck& deck, bool healer, bool anyRole)
 // advanced as seats are taken. With `healersNeeded` (an arena), a seat goes
 // to a healer while the team still needs one and to anyone else after that;
 // healers come first, so a fill spread over several ticks lands on the count.
+std::vector<ObjectGuid> LadderRosterFor(Battleground const* bg, uint32 team);
+
 uint32 AddClonesToTeam(Battleground* bg, uint32 team, uint32 wanted, MatchTally const& tally,
     std::unordered_set<ObjectGuid>& usedSources, uint32& matchClones, uint32& totalClones, uint32 nowMs,
     Optional<uint32> healersNeeded = {})
@@ -860,8 +877,60 @@ uint32 AddClonesToTeam(Battleground* bg, uint32 team, uint32 wanted, MatchTally 
         ++totalClones;
     };
 
+    // 0. The side of a rated bot match held by a team of the bot ladder is that
+    // team: its own members, every one of them. A member that cannot be dealt
+    // in leaves its seat to the pools below.
+    std::vector<ObjectGuid> const roster = LadderRosterFor(bg, team);
+    if (!roster.empty())
+    {
+        RefreshOfflinePoolIfStale(nowMs);
+        WorldSession* rosterCallback = nullptr;
+        for (ObjectGuid const& sourceGuid : roster)
+        {
+            if (added >= wanted || !governorAllows())
+                break;
+
+            if (usedSources.count(sourceGuid))
+                continue;
+
+            if (Player* source = ObjectAccessor::FindConnectedPlayer(sourceGuid))
+            {
+                if (playerbot::PlayerbotObcCloneManager::CreateCustomGameClone(source, bg, team, ""))
+                    seated(sourceGuid, source->GetClass());
+                continue;
+            }
+
+            if (!rosterCallback && !(rosterCallback = FindCallbackSession(tally, teamIndex)))
+                break;
+
+            if (!playerbot::PlayerbotObcCloneManager::QueueCustomGameClone(sourceGuid, rosterCallback, bg, team, ""))
+                continue;
+
+            PendingOfflineClone pending;
+            pending.instanceId = bg->GetInstanceID();
+            pending.team = team;
+            pending.sourceGuid = sourceGuid;
+            pending.requestedMs = nowMs;
+            g_PendingOfflineClones.push_back(pending);
+
+            seated(sourceGuid, ClassOfSource(sourceGuid));
+            TC_LOG_DEBUG("playerbots.bgfill", "PlayerbotBgFillDriver: requested a copy of ladder team member {} for team {} of instance {}.",
+                sourceGuid.ToString(), team, bg->GetInstanceID());
+        }
+    }
+
+    // The pools below never deal in a member of the ladder team on the other
+    // side: that team's seats are its own.
+    auto const excludedFromPools = [&]()
+    {
+        std::unordered_set<ObjectGuid> excluded = usedSources;
+        for (ObjectGuid const& guid : LadderRosterFor(bg, team == ALLIANCE ? uint32(HORDE) : uint32(ALLIANCE)))
+            excluded.insert(guid);
+        return excluded;
+    };
+
     // 1. Online bots in the bracket.
-    SourceDeck online = MakeDeck(CollectOnlineSources(minLevel, maxLevel, usedSources), matchTier, mix, draws, healersNeeded.has_value());
+    SourceDeck online = MakeDeck(CollectOnlineSources(minLevel, maxLevel, excludedFromPools()), matchTier, mix, draws, healersNeeded.has_value());
     auto const seatOnline = [&](bool anyRole)
     {
         while (added < wanted && governorAllows())
@@ -903,7 +972,7 @@ uint32 AddClonesToTeam(Battleground* bg, uint32 team, uint32 wanted, MatchTally 
         {
             offlineRead = true;
             RefreshOfflinePoolIfStale(nowMs);
-            offline = MakeDeck(CollectOfflineSources(minLevel, maxLevel, usedSources), matchTier, mix, draws, healersNeeded.has_value());
+            offline = MakeDeck(CollectOfflineSources(minLevel, maxLevel, excludedFromPools()), matchTier, mix, draws, healersNeeded.has_value());
             if (!offline.healers.empty() || !offline.others.empty())
                 callbackSession = FindCallbackSession(tally, teamIndex);
         }
@@ -1349,6 +1418,307 @@ std::vector<uint32> ParseIdList(std::string const& key)
 
     return ids;
 }
+
+// ---------------------------------------------------------------- bot ladder
+//
+// Playerbot.BgFill.RatedArena.Ladder: arena teams of the level-cap PvP-only bots.
+// A rated team the queue gives clones to plays one of them instead of nameless
+// clones (BattlegroundQueue::StartBotFilledRatedMatches): the clones on the other
+// side are copies of that team's members (LadderRosterFor), and both teams are
+// rated. Between those games the ladder's teams play each other on paper
+// (SimulateLadderGames), so the standings move while nobody is queued.
+//
+// A ladder team is any arena team whose captain is a level-cap PvP-only
+// character, which is how they are found again after a restart with nothing
+// stored but the teams themselves. Teams are only ever added: turning the
+// ladder off stops the queue from using them and leaves them where they are.
+
+std::array<char const*, 32> const kLadderAdjectives =
+{
+    "Crimson", "Frozen", "Silent", "Savage", "Golden", "Shadow", "Iron", "Storm",
+    "Burning", "Wicked", "Grim", "Swift", "Hollow", "Ashen", "Scarlet", "Feral",
+    "Arcane", "Rusty", "Bitter", "Lucky", "Rowdy", "Mighty", "Sly", "Bold",
+    "Thorned", "Wild", "Gilded", "Stone", "Blood", "Moon", "Sun", "Dread"
+};
+
+std::array<char const*, 32> const kLadderNouns =
+{
+    "Vanguard", "Reavers", "Wardens", "Jackals", "Ravens", "Wolves", "Serpents", "Hammers",
+    "Blades", "Lancers", "Outlaws", "Zealots", "Marauders", "Sentinels", "Vipers", "Bandits",
+    "Mystics", "Brutes", "Gnolls", "Murlocs", "Raptors", "Ogres", "Drakes", "Harpies",
+    "Kobolds", "Titans", "Rangers", "Knights", "Vultures", "Scorpids", "Sharks", "Bears"
+};
+
+std::array<uint8, 4> const kLadderArenaTypes = { ARENA_TYPE_2v2, ARENA_TYPE_3v3, ARENA_TYPE_4v4, ARENA_TYPE_5v5 };
+
+// "Crimson Ravens" - any pair still free and valid as a charter name.
+std::string MakeLadderTeamName()
+{
+    for (uint32 attempt = 0; attempt < 200; ++attempt)
+    {
+        std::string const name = Trinity::StringFormat("{} {}",
+            kLadderAdjectives[urand(0, uint32(kLadderAdjectives.size()) - 1)], kLadderNouns[urand(0, uint32(kLadderNouns.size()) - 1)]);
+        if (ObjectMgr::IsValidCharterName(name) && !sObjectMgr->IsReservedName(name) && !sArenaTeamMgr->GetArenaTeamByName(name))
+            return name;
+    }
+
+    return {};
+}
+
+struct LadderCandidate
+{
+    ObjectGuid guid;
+    uint8 classId = 0;
+    bool healer = false;
+};
+
+// The level-cap characters of the PvP-only accounts: the pool the arena fill
+// copies at the cap, and the only one the ladder's teams are made of.
+std::vector<LadderCandidate> CollectLadderCandidates()
+{
+    uint32 const maxLevel = sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL);
+    auto const& pvpOnlyAccounts = playerbot::PveManager::GetConfig().pvpOnlyAccountIds;
+
+    std::vector<LadderCandidate> candidates;
+    for (OfflineCandidate const& entry : g_OfflinePool.entries)
+    {
+        if (entry.level != maxLevel || !std::binary_search(pvpOnlyAccounts.begin(), pvpOnlyAccounts.end(), entry.accountId))
+            continue;
+
+        LadderCandidate candidate;
+        candidate.guid = ObjectGuid::Create<HighGuid::Player>(entry.lowGuid);
+        candidate.classId = entry.classId;
+        candidate.healer = g_OfflinePool.healers.count(entry.lowGuid) != 0;
+        candidates.push_back(candidate);
+    }
+
+    return candidates;
+}
+
+// The roster of a new team of `type`, from the candidates not yet in a team of
+// that size: the healers the arena fill deals a side (HealersPerTeam, or
+// ...OfFive), then everyone else, each class once while there is a choice.
+// Empty when not enough are left.
+std::vector<ObjectGuid> DealLadderRoster(std::vector<LadderCandidate> const& candidates, uint8 type)
+{
+    std::vector<LadderCandidate const*> free;
+    for (LadderCandidate const& candidate : candidates)
+        if (!sCharacterCache->GetCharacterArenaTeamIdByGuid(candidate.guid, type))
+            free.push_back(&candidate);
+    Trinity::Containers::RandomShuffle(free);
+
+    uint32 const healers = std::min<uint32>(type >= ARENA_TYPE_5v5 ? g_Config.healersPerTeamOfFive : g_Config.healersPerTeam, type);
+    std::vector<ObjectGuid> roster;
+    std::array<bool, MAX_CLASSES> classTaken = {};
+    auto const take = [&](bool healer, bool repeatClasses, uint32 upTo)
+    {
+        for (LadderCandidate const*& candidate : free)
+        {
+            if (!candidate || roster.size() >= upTo || candidate->healer != healer)
+                continue;
+
+            bool const knownClass = candidate->classId < MAX_CLASSES;
+            if (!repeatClasses && knownClass && classTaken[candidate->classId])
+                continue;
+
+            roster.push_back(candidate->guid);
+            if (knownClass)
+                classTaken[candidate->classId] = true;
+            candidate = nullptr;
+        }
+    };
+
+    take(true, false, healers);
+    take(true, true, healers);
+    take(false, false, type);
+    take(false, true, type);
+    // short of anybody else, a healer more
+    take(true, false, type);
+    take(true, true, type);
+
+    if (roster.size() < type)
+        roster.clear();
+    return roster;
+}
+
+// Finds the ladder's teams, makes the ones the config still asks for, and hands
+// the lot to the queue (BattlegroundMgr::SetArenaLadderTeams).
+void SyncArenaLadder()
+{
+    if (!g_Config.enabled || !g_Config.ratedArenasEnabled || !g_Config.ladderEnabled)
+    {
+        sBattlegroundMgr->SetArenaLadderTeams({});
+        return;
+    }
+
+    // read fresh: the teams have to be dealt from who exists now
+    g_OfflinePool.loaded = false;
+    RefreshOfflinePoolIfStale(GameTime::GetGameTimeMS());
+    std::vector<LadderCandidate> const candidates = CollectLadderCandidates();
+
+    std::unordered_set<ObjectGuid> candidateGuids;
+    for (LadderCandidate const& candidate : candidates)
+        candidateGuids.insert(candidate.guid);
+
+    std::vector<uint32> ladder;
+    std::array<uint32, ARENA_TYPE_5v5 + 1> teamsOfType = {};
+    for (auto const& [teamId, team] : sArenaTeamMgr->GetArenaTeams())
+    {
+        if (team->GetType() >= teamsOfType.size() || !candidateGuids.count(team->GetCaptain()))
+            continue;
+
+        ladder.push_back(teamId);
+        ++teamsOfType[team->GetType()];
+    }
+
+    uint32 made = 0;
+    for (uint8 type : kLadderArenaTypes)
+    {
+        while (teamsOfType[type] < g_Config.ladderTeams[type])
+        {
+            std::vector<ObjectGuid> const roster = DealLadderRoster(candidates, type);
+            std::string const name = roster.empty() ? std::string() : MakeLadderTeamName();
+            if (name.empty())
+            {
+                TC_LOG_WARN("server.loading", "Playerbot arena ladder: {}v{} has {} of the {} teams asked for; there are not enough level-cap PvP-only bots left to make another.",
+                    uint32(type), uint32(type), teamsOfType[type], g_Config.ladderTeams[type]);
+                break;
+            }
+
+            // an emblem of its own: any background, emblem and border colour
+            ArenaTeam* team = new ArenaTeam();
+            if (!team->Create(roster.front(), type, name, 0xFF000000 | urand(0, 0xFFFFFF), uint8(urand(0, 99)),
+                0xFF000000 | urand(0, 0xFFFFFF), uint8(urand(0, 5)), 0xFF000000 | urand(0, 0xFFFFFF)))
+            {
+                delete team;
+                TC_LOG_ERROR("server.loading", "Playerbot arena ladder: could not make the {}v{} team '{}'.", uint32(type), uint32(type), name);
+                break;
+            }
+
+            sArenaTeamMgr->AddArenaTeam(team);
+            for (std::size_t member = 1; member < roster.size(); ++member)
+                team->AddMember(roster[member]);
+
+            ladder.push_back(team->GetId());
+            ++teamsOfType[type];
+            ++made;
+        }
+    }
+
+    std::sort(ladder.begin(), ladder.end());
+    sBattlegroundMgr->SetArenaLadderTeams(ladder);
+
+    TC_LOG_INFO("server.loading", "Playerbot arena ladder: {} teams (2v2 {}, 3v3 {}, 4v4 {}, 5v5 {}), {} of them new, from {} level-cap PvP-only bots.",
+        uint32(ladder.size()), teamsOfType[ARENA_TYPE_2v2], teamsOfType[ARENA_TYPE_3v3], teamsOfType[ARENA_TYPE_4v4],
+        teamsOfType[ARENA_TYPE_5v5], made, uint32(candidates.size()));
+}
+
+// The members of the ladder team holding `team`'s side of a rated bot match
+// (Battleground::GetBotFillSide), or nobody.
+std::vector<ObjectGuid> LadderRosterFor(Battleground const* bg, uint32 team)
+{
+    std::vector<ObjectGuid> roster;
+    if (!bg->isRated() || !team || bg->GetBotFillSide() != team)
+        return roster;
+
+    if (ArenaTeam* arenaTeam = sArenaTeamMgr->GetArenaTeamById(bg->GetArenaTeamIdForTeam(team)))
+        for (auto itr = arenaTeam->m_membersBegin(); itr != arenaTeam->m_membersEnd(); ++itr)
+            roster.push_back(itr->Guid);
+
+    return roster;
+}
+
+// A team's edge in a game on paper: its members' tier (Playerbot.BgFill.Tier.*),
+// worth 150 rating a step either side of medium, a member in no tier counting
+// as medium. The ladder starts everybody level; this is what lets the stronger
+// rosters work their way up it.
+float LadderTierEdge(ArenaTeam* team)
+{
+    float tiers = 0.0f;
+    uint32 members = 0;
+    for (auto itr = team->m_membersBegin(); itr != team->m_membersEnd(); ++itr, ++members)
+    {
+        uint8 const tier = TierOfSource(itr->Guid);
+        tiers += tier == kNoTier ? 1.0f : float(tier);
+    }
+
+    return members ? (tiers / float(members) - 1.0f) * 150.0f : 0.0f;
+}
+
+// One game on paper a size: a ladder team at random against one of the three
+// nearest it in matchmaker rating - not the one it met last while there is
+// anybody else - neither of them in a real match. The winner is rolled from the
+// stock Elo chance on their ratings plus LadderTierEdge, and both teams and all
+// their members are rated as a real game would rate them.
+void SimulateLadderGames()
+{
+    constexpr std::size_t NEAREST = 3;
+
+    for (uint8 type : kLadderArenaTypes)
+    {
+        std::vector<ArenaTeam*> teams;
+        for (uint32 teamId : sBattlegroundMgr->GetArenaLadderTeams())
+            if (ArenaTeam* team = sArenaTeamMgr->GetArenaTeamById(teamId))
+                if (team->GetType() == type && !sBattlegroundMgr->IsArenaTeamInMatch(teamId))
+                    teams.push_back(team);
+
+        if (teams.size() < 2)
+            continue;
+
+        ArenaTeam* const first = teams[urand(0, uint32(teams.size()) - 1)];
+        uint32 const firstMatchmakerRating = first->GetRosterAverageMMR();
+
+        std::vector<ArenaTeam*> opponents;
+        for (ArenaTeam* team : teams)
+            if (team != first && (teams.size() <= 2 || team->GetId() != first->GetPreviousOpponents()))
+                opponents.push_back(team);
+
+        std::sort(opponents.begin(), opponents.end(), [firstMatchmakerRating](ArenaTeam* left, ArenaTeam* right)
+        {
+            return std::abs(int32(left->GetRosterAverageMMR()) - int32(firstMatchmakerRating)) <
+                std::abs(int32(right->GetRosterAverageMMR()) - int32(firstMatchmakerRating));
+        });
+        ArenaTeam* const second = opponents[urand(0, uint32(std::min(opponents.size(), NEAREST)) - 1)];
+        uint32 const secondMatchmakerRating = second->GetRosterAverageMMR();
+
+        float const firstStrength = std::max(0.0f, float(firstMatchmakerRating) + LadderTierEdge(first));
+        float const secondStrength = std::max(0.0f, float(secondMatchmakerRating) + LadderTierEdge(second));
+        bool const firstWins = roll_chance_f(first->GetChanceAgainst(uint32(firstStrength), uint32(secondStrength)) * 100.0f);
+
+        ArenaTeam* const winner = firstWins ? first : second;
+        ArenaTeam* const loser = firstWins ? second : first;
+        uint32 const winnerMatchmakerRating = firstWins ? firstMatchmakerRating : secondMatchmakerRating;
+        uint32 const loserMatchmakerRating = firstWins ? secondMatchmakerRating : firstMatchmakerRating;
+
+        int32 winnerChange = 0;
+        int32 loserChange = 0;
+        int32 const winnerMatchmakerChange = winner->WonAgainst(winnerMatchmakerRating, loserMatchmakerRating, winnerChange);
+        int32 const loserMatchmakerChange = loser->LostAgainst(loserMatchmakerRating, winnerMatchmakerRating, loserChange);
+
+        std::vector<ObjectGuid> members;
+        for (auto itr = winner->m_membersBegin(); itr != winner->m_membersEnd(); ++itr)
+            members.push_back(itr->Guid);
+        for (ObjectGuid const& member : members)
+            winner->OfflineMemberWon(member, loserMatchmakerRating, winnerMatchmakerChange);
+
+        members.clear();
+        for (auto itr = loser->m_membersBegin(); itr != loser->m_membersEnd(); ++itr)
+            members.push_back(itr->Guid);
+        for (ObjectGuid const& member : members)
+            loser->OfflineMemberLost(member, winnerMatchmakerRating, loserMatchmakerChange);
+
+        winner->SetPreviousOpponents(loser->GetId());
+        loser->SetPreviousOpponents(winner->GetId());
+        winner->SaveToDB();
+        loser->SaveToDB();
+        winner->NotifyStatsChanged();
+        loser->NotifyStatsChanged();
+
+        TC_LOG_INFO("playerbots.bgfill", "Playerbot arena ladder: {}v{} {} ({} {:+}) beat {} ({} {:+}) on paper.",
+            uint32(type), uint32(type), winner->GetName(), winner->GetRating(), winnerChange,
+            loser->GetName(), loser->GetRating(), loserChange);
+    }
+}
 }
 
 namespace playerbot
@@ -1365,6 +1735,13 @@ void PlayerbotBgFillDriver::LoadConfig()
     config.ratedArenaQueueWaitMs = uint32(std::max<int32>(
         sConfigMgr->GetIntDefault("Playerbot.BgFill.RatedArena.QueueWaitSeconds", 30), 0)) * IN_MILLISECONDS;
     config.ratedArenaAutoCreateTeam = sConfigMgr->GetBoolDefault("Playerbot.BgFill.RatedArena.AutoCreateTeam", true);
+    config.ladderEnabled = sConfigMgr->GetBoolDefault("Playerbot.BgFill.RatedArena.Ladder.Enable", false);
+    config.ladderTeams[ARENA_TYPE_2v2] = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.RatedArena.Ladder.Teams2v2", 12), 0));
+    config.ladderTeams[ARENA_TYPE_3v3] = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.RatedArena.Ladder.Teams3v3", 9), 0));
+    config.ladderTeams[ARENA_TYPE_4v4] = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.RatedArena.Ladder.Teams4v4", 6), 0));
+    config.ladderTeams[ARENA_TYPE_5v5] = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.RatedArena.Ladder.Teams5v5", 6), 0));
+    config.ladderSimulateMs = uint32(std::max<int32>(
+        sConfigMgr->GetIntDefault("Playerbot.BgFill.RatedArena.Ladder.SimulateMinutes", 5), 0)) * MINUTE * IN_MILLISECONDS;
     config.maxPerTeam = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.MaxPerTeam", 15), 0));
     config.clonesPerTick = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.ClonesPerTick", 2), 1));
     config.useOfflineBots = sConfigMgr->GetBoolDefault("Playerbot.BgFill.UseOfflineBots", true);
@@ -1442,6 +1819,15 @@ void PlayerbotBgFillDriver::LoadConfig()
     if (!g_Config.tierByCharacter.empty() || !g_Config.tierByBattleground.empty())
         TC_LOG_INFO("server.loading", "Playerbot battleground fill tiers (bots/battlegrounds): easy {}/{}, medium {}/{}, hard {}/{}.",
             tierCharacters[0], tierBattlegrounds[0], tierCharacters[1], tierBattlegrounds[1], tierCharacters[2], tierBattlegrounds[2]);
+
+    if (g_WorldStarted)
+        SyncArenaLadder();
+}
+
+void PlayerbotBgFillDriver::OnStartup()
+{
+    g_WorldStarted = true;
+    SyncArenaLadder();
 }
 
 void PlayerbotBgFillDriver::OnWorldUpdate(uint32 diffMs)
@@ -1456,6 +1842,16 @@ void PlayerbotBgFillDriver::OnWorldUpdate(uint32 diffMs)
     {
         g_QueueWakeAccumulatorMs = 0;
         WakeQueuesForWaitingPlayers(nowMs);
+    }
+
+    if (g_Config.ladderEnabled && g_Config.ratedArenasEnabled && g_Config.ladderSimulateMs)
+    {
+        g_LadderSimulateAccumulatorMs += diffMs;
+        if (g_LadderSimulateAccumulatorMs >= g_Config.ladderSimulateMs)
+        {
+            g_LadderSimulateAccumulatorMs = 0;
+            SimulateLadderGames();
+        }
     }
 
     g_TickAccumulatorMs += diffMs;

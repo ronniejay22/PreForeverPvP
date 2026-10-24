@@ -31,7 +31,10 @@ EndScriptData */
 #include "ObjectMgr.h"
 #include "Player.h"
 #include "RBAC.h"
+#include "StringFormat.h"
 #include "WorldSession.h"
+#include <algorithm>
+#include <vector>
 
 using namespace Trinity::ChatCommands;
 
@@ -50,6 +53,7 @@ public:
             { "captain",        HandleArenaCaptainCommand,  rbac::RBAC_PERM_COMMAND_ARENA_CAPTAIN, Console::No },
             { "info",           HandleArenaInfoCommand,     rbac::RBAC_PERM_COMMAND_ARENA_INFO,    Console::Yes },
             { "lookup",         HandleArenaLookupCommand,   rbac::RBAC_PERM_COMMAND_ARENA_LOOKUP,  Console::No },
+            { "ladder",         HandleArenaLadderCommand,   rbac::RBAC_PERM_COMMAND_ARENA_LOOKUP,  Console::Yes },
         };
         static ChatCommandTable commandTable =
         {
@@ -242,6 +246,59 @@ public:
 
         if (!found)
             handler->PSendSysMessage(LANG_ARENA_ERROR_NAME_NOT_FOUND, std::string(needle).c_str());
+
+        return true;
+    }
+
+    // The standings of one arena size, 2v2 unless another is named: every team
+    // of it by rating - the playerbot module's bot ladder and everybody else -
+    // with the caller's own team marked, and listed even when it is below the
+    // first 25.
+    static bool HandleArenaLadderCommand(ChatHandler* handler, Optional<uint8> size)
+    {
+        uint8 const type = size.value_or(ARENA_TEAM_2v2);
+        if (type != ARENA_TEAM_2v2 && type != ARENA_TEAM_3v3 && type != ARENA_TEAM_4v4 && type != ARENA_TEAM_5v5)
+        {
+            handler->SendSysMessage("Usage: .arena ladder [2|3|4|5]");
+            handler->SetSentErrorMessage(true);
+            return false;
+        }
+
+        std::vector<ArenaTeam*> teams;
+        for (auto [teamId, team] : sArenaTeamMgr->GetArenaTeams())
+            if (team->GetType() == type)
+                teams.push_back(team);
+
+        if (teams.empty())
+        {
+            handler->SendSysMessage(Trinity::StringFormat("There are no {}v{} arena teams yet.", uint32(type), uint32(type)));
+            return true;
+        }
+
+        std::sort(teams.begin(), teams.end(), [](ArenaTeam const* left, ArenaTeam const* right)
+        {
+            if (left->GetRating() != right->GetRating())
+                return left->GetRating() > right->GetRating();
+            return left->GetStats().SeasonWins > right->GetStats().SeasonWins;
+        });
+
+        Player const* self = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        uint32 const ownTeamId = self ? self->GetArenaTeamId(ArenaTeam::GetSlotByType(type)) : 0;
+
+        constexpr std::size_t SHOWN = 25;
+        handler->SendSysMessage(Trinity::StringFormat("{}v{} ladder - {} teams:", uint32(type), uint32(type), teams.size()));
+        for (std::size_t place = 0; place < teams.size(); ++place)
+        {
+            ArenaTeam* team = teams[place];
+            bool const own = team->GetId() == ownTeamId;
+            if (place >= SHOWN && !own)
+                continue;
+
+            ArenaTeamStats const& stats = team->GetStats();
+            handler->SendSysMessage(Trinity::StringFormat("{:>2}. {} - {} rating, {}-{} this season, MMR {}{}",
+                place + 1, team->GetName(), team->GetRating(), stats.SeasonWins, stats.SeasonGames - stats.SeasonWins,
+                team->GetRosterAverageMMR(), own ? "  <- you" : ""));
+        }
 
         return true;
     }
