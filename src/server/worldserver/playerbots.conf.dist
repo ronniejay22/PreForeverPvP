@@ -125,7 +125,8 @@ Playerbot.Pvp.GuildName = "The Robot Masters"
 #    Pads public battlegrounds and unrated arena skirmishes with in-memory copies of the managed
 #    playerbots instead of pulling the bots themselves out of the world. A real player who queues
 #    alone gets a match after a short wait; both teams are then filled with clones matched to the
-#    bracket's level range. Rated arenas are never filled.
+#    bracket's level range. Rated arenas are filled only where Playerbot.BgFill.RatedArena.Enable
+#    says so (below).
 #    The clones step aside one at a time as more real players are invited, refill seats people
 #    leave, and are gone once the last real player is. The resource governor above applies to
 #    them as it does to custom-game bots.
@@ -160,7 +161,7 @@ Playerbot.BgFill.QueueWaitSeconds = 15
 
 #    Playerbot.BgFill.SkirmishArena.Enable
 #        Description: Fill unrated arena skirmishes with the same transient bot clones used by
-#                     battleground fill. Rated arenas are always excluded.
+#                     battleground fill. Rated arenas have their own switch below.
 #        Default:     1 - (Enabled)
 #                     0 - (Disabled)
 
@@ -175,6 +176,60 @@ Playerbot.BgFill.SkirmishArena.Enable = 1
 #        Default:     0
 
 Playerbot.BgFill.SkirmishArena.QueueWaitSeconds = 0
+
+#    Playerbot.BgFill.SkirmishArena.HealersPerTeam
+#    Playerbot.BgFill.SkirmishArena.HealersPerTeamOfFive
+#        Description: Healers each side of a clone-filled skirmish ends up with - each squad in
+#                     Four Corners, each side of a Buffle Shuffle's first round - counting the
+#                     people already there. HealersPerTeam is for teams of two to four,
+#                     HealersPerTeamOfFive for teams of five. A healer is anyone with most
+#                     talent points in a healing tree, as Buffle Shuffle judges it. Where the
+#                     bracket has too few healer bots, both sides get the same lower number.
+#                     0 deals clones by class variety alone.
+#        Default:     1, 2
+
+Playerbot.BgFill.SkirmishArena.HealersPerTeam = 1
+Playerbot.BgFill.SkirmishArena.HealersPerTeamOfFive = 2
+
+#    Playerbot.BgFill.RatedArena.Enable
+#        Description: Rated 2v2, 3v3, 4v4 and 5v5 played the way skirmishes are: queued alone or
+#                     by a party smaller than the arena, and made up with clones. Real arena teams
+#                     are still paired with each other first, as stock - two short teams included,
+#                     each topped up with clones. A team the queue finds no real opponent for in
+#                     RatedArena.QueueWaitSeconds plays clones instead, and the clones count as an
+#                     opponent of the team's own matchmaker rating: a win or a loss moves its team
+#                     rating, matchmaker rating and personal ratings exactly as one against an
+#                     even team would (about 12 points at the stock modifiers), and arena points
+#                     follow from that as usual. Nothing is rated when no clone could be found to
+#                     fight. The last person leaving a side forfeits for it. Healers are dealt by
+#                     SkirmishArena.HealersPerTeam*. "Arena bots" in the Battlegrounds tab still
+#                     keeps a character out of clone-filled matches, rated ones included.
+#                     The arena window's rated rows are told whether this is on (CCGAME
+#                     ARENARATED) and can only be joined alone or short-handed while it is.
+#                     Four Corners and Buffle Shuffle are not affected.
+#        Default:     0 - (Disabled, rated arenas are stock: whole teams against whole teams)
+#                     1 - (Enabled)
+
+Playerbot.BgFill.RatedArena.Enable = 0
+
+#    Playerbot.BgFill.RatedArena.QueueWaitSeconds
+#        Description: How long a rated team waits for a real opponent before it is given clones.
+#                     0 gives it clones as soon as the queue is examined, which leaves two real
+#                     teams that queue a few seconds apart almost no chance to meet.
+#        Default:     30
+
+Playerbot.BgFill.RatedArena.QueueWaitSeconds = 30
+
+#    Playerbot.BgFill.RatedArena.AutoCreateTeam
+#        Description: A character queueing rated alone with no arena team of that size is made a
+#                     team of one, named "<Name> 2v2" (numbered, should the name be taken), and
+#                     queued in it - at the level a charter asks for, the realm's maximum. A party
+#                     is never given a team: its leader's team is used, as stock, and every member
+#                     has to be in it.
+#        Default:     1 - (Enabled)
+#                     0 - (Disabled, a team comes from a charter or `.arena create` as stock)
+
+Playerbot.BgFill.RatedArena.AutoCreateTeam = 1
 
 #    Playerbot.BgFill.MaxPerTeam
 #        Description: Team size the clones fill up to, capped by the battleground's own maximum

@@ -70,16 +70,26 @@ namespace
     //                             only, queued alone
     //
     // Sent before every arena window so a client never keeps the last mode.
-    void SendArenaQueueMode(Player* player, std::string const& mode)
+    //
+    //   CCGAME ARENARATED:<0|1>   whether the window's rated rows can be joined
+    //                             alone or short-handed - 1 only for the ordinary
+    //                             queue where the realm fills rated arenas with
+    //                             clones (BattlegroundMgr::IsBotFillRatedArena)
+    void SendArenaFrameMessage(Player* player, std::string const& body)
     {
         if (!player || !player->GetSession() || player->GetSession()->IsVirtualSession())
             return;
 
-        std::string const message = "CCGAME\tARENAQUEUE:" + mode;
+        std::string const message = "CCGAME\t" + body;
         WorldPacket data;
         ChatHandler::BuildChatPacket(data, CHAT_MSG_WHISPER, LANG_ADDON, player->GetGUID(), player->GetGUID(),
             message, 0, player->GetName(), player->GetName());
         player->SendDirectMessage(&data);
+    }
+
+    void SendArenaQueueMode(Player* player, std::string const& mode)
+    {
+        SendArenaFrameMessage(player, "ARENAQUEUE:" + mode);
     }
 
     bool RejectNormalBattlegroundQueueFromCustomLobby(WorldSession* session)
@@ -180,6 +190,8 @@ void WorldSession::SendBattleGroundList(ObjectGuid guid, BattlegroundTypeId bgTy
             SendArenaQueueMode(_player, "SHUFFLE");
         else
             SendArenaQueueMode(_player, std::to_string(bgTemplate && bgTemplate->IsSquadMatch() ? bgTemplate->GetSquadCount() : 0));
+        SendArenaFrameMessage(_player, std::string("ARENARATED:") +
+            (bgTypeId == BATTLEGROUND_AA && sBattlegroundMgr->IsBotFillRatedArenaEnabled() ? "1" : "0"));
         bgTypeId = BATTLEGROUND_AA;
     }
 
@@ -697,17 +709,10 @@ void WorldSession::HandleBattleFieldPortOpcode(WorldPacket &recvData)
         if (bg->isArena() && bg->GetStatus() > STATUS_WAIT_QUEUE)
             return;
 
-        // if player leaves rated arena match before match start, it is counted as he played but he lost
-        if (ginfo.IsRated && ginfo.IsInvitedToBGInstanceGUID)
-        {
-            ArenaTeam* at = sArenaTeamMgr->GetArenaTeamById(ginfo.Team);
-            if (at)
-            {
-                TC_LOG_DEBUG("bg.battleground", "UPDATING memberLost's personal arena rating for {} by opponents rating: {}, because he has left queue!", _player->GetGUID().ToString(), ginfo.OpponentsTeamRating);
-                at->MemberLost(_player, ginfo.OpponentsMatchmakerRating);
-                at->SaveToDB();
-            }
-        }
+        // Leaving a rated arena after the invite counts as a game played and
+        // lost. RemovePlayer below charges it, against the team's own arena
+        // team id; this used to charge it here too, looking the team up by
+        // faction - which never found one, or found somebody else's.
         _player->RemoveBattlegroundQueueId(bgQueueTypeId);  // must be called this way, because if you move this call to queue->removeplayer, it causes bugs
         sBattlegroundMgr->BuildBattlegroundStatusPacket(&data, bg, queueSlot, STATUS_NONE, 0, 0, 0, 0);
         bgQueue.RemovePlayer(_player->GetGUID(), true);
@@ -841,10 +846,6 @@ void WorldSession::HandleBattlemasterJoinArena(WorldPacket& recvData)
     if (RejectNormalBattlegroundQueueFromCustomLobby(this))
         return;
 
-    // ignore if rated but queued solo
-    if (isRated && !asGroup)
-        return;
-
     // ignore if we already in BG or BG queue
     if (_player->InBattleground())
         return;
@@ -896,6 +897,20 @@ void WorldSession::HandleBattlemasterJoinArena(WorldPacket& recvData)
         ChatHandler(this).SendSysMessage("Buffle Shuffle is a 2v2 or 3v3 skirmish.");
         return;
     }
+
+    // A rated arena where the realm fills rated arenas with clones is queued
+    // like a skirmish: alone, or by a party smaller than the arena, and the
+    // rest of both sides is made up with clones. Squad matches keep their own
+    // rules. Anywhere else a rated arena is only ever queued by a party.
+    bool const ratedFill = isRated && queueBgTypeId == BATTLEGROUND_AA && sBattlegroundMgr->IsBotFillRatedArena(arenatype);
+    if (ratedFill && asGroup && !_player->GetGroup())
+        asGroup = 0;                                        // "Join as Group" with no group: alone
+    if (isRated && !asGroup && !ratedFill)
+        return;
+
+    // The client numbers the arena rows 2v2, 3v3, 4v4, 5v5; a character's
+    // team slots are 2v2, 3v3, 5v5, 4v4 (ArenaTeam::GetSlotByType).
+    uint8 const teamSlot = ArenaTeam::GetSlotByType(arenatype);
 
     //check existance
     Battleground* bg = sBattlegroundMgr->GetBattlegroundTemplate(queueBgTypeId);
@@ -955,24 +970,80 @@ void WorldSession::HandleBattlemasterJoinArena(WorldPacket& recvData)
         if (grp->GetLeaderGUID() != _player->GetGUID())
             return;
         uint32 const partySize = shuffle ? uint32(arenatype) * 2 : uint32(arenatype);
-        err = grp->CanJoinBattlegroundQueue(bg, bgQueueTypeId, partySize, partySize, isRated != 0, arenaslot);
+        err = grp->CanJoinBattlegroundQueue(bg, bgQueueTypeId, ratedFill ? 1 : partySize, partySize, isRated != 0, teamSlot);
     }
 
     uint32 ateamId = 0;
 
     if (isRated)
     {
-        ateamId = _player->GetArenaTeamId(arenaslot);
+        ateamId = _player->GetArenaTeamId(teamSlot);
         // check real arenateam existence only here (if it was moved to group->CanJoin .. () then we would ahve to get it twice)
         ArenaTeam* at = sArenaTeamMgr->GetArenaTeamById(ateamId);
+
+        // A side short of the arena size is made up with clones, which
+        // somebody who unticked "Arena bots" has said no to. Told now - and
+        // before any team is made for them - rather than left to wait for a
+        // match that would never be made.
+        uint32 const people = asGroup ? grp->GetMembersCount() : 1;
+        if (ratedFill && people < arenatype && (!asGroup || err > 0))
+        {
+            bool optedOut = asGroup ? false : _player->HasArenaBotFillOptOut();
+            if (asGroup)
+                for (GroupReference* itr = grp->GetFirstMember(); itr != nullptr && !optedOut; itr = itr->next())
+                    if (Player* member = itr->GetSource())
+                        optedOut = member->HasArenaBotFillOptOut();
+
+            if (optedOut)
+            {
+                ChatHandler(this).PSendSysMessage("A rated %uv%u with fewer than %u of you is made up with bots, and \"Arena bots\" is unticked in the Battlegrounds tab.",
+                    uint32(arenatype), uint32(arenatype), uint32(arenatype));
+                return;
+            }
+        }
+
+        // Alone with no team of this size: where the realm fills rated arenas
+        // the character is made a team of one, at the level a charter asks for.
+        // A party is never given one as a side effect - its members would not
+        // be in it, and the team rule refuses them.
+        if (!at && ratedFill && !asGroup && sBattlegroundMgr->AutoCreatesRatedArenaTeams())
+        {
+            if (!_player->IsMaxLevel())
+            {
+                ChatHandler(this).PSendSysMessage("Rated arenas are for level %u characters.",
+                    sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL));
+                return;
+            }
+
+            if ((at = sArenaTeamMgr->CreateSoloArenaTeam(_player, arenatype)))
+            {
+                ateamId = at->GetId();
+                at->Query(this);
+                at->Roster(this);
+                at->SendStats(this);
+                ChatHandler(this).PSendSysMessage("You are now the captain of the %uv%u arena team \"%s\". Its rating is yours to build.",
+                    uint32(arenatype), uint32(arenatype), at->GetName().c_str());
+            }
+        }
+
         if (!at)
         {
             _player->GetSession()->SendNotInArenaTeamPacket(arenatype);
+            if (ratedFill && asGroup)
+                ChatHandler(this).PSendSysMessage("A party queues rated in its leader's %uv%u arena team. Queue alone to have one made for you, then invite your party into it.",
+                    uint32(arenatype), uint32(arenatype));
             return;
         }
+
         // get the team rating for queueing
         arenaRating = at->GetRating();
-        matchmakerRating = at->GetAverageMMR(grp);
+        // A team's average over nobody is 0, which the queue reads as unrated:
+        // alone, it is the character's own matchmaker rating.
+        if (asGroup)
+            matchmakerRating = at->GetAverageMMR(grp);
+        else if (ArenaTeamMember const* member = at->GetMember(_player->GetGUID()))
+            matchmakerRating = member->MatchMakerRating;
+        matchmakerRating = std::max<uint32>(matchmakerRating, 1);
         // the arenateam id must match for everyone in the group
 
         if (arenaRating <= 0)
@@ -992,7 +1063,7 @@ void WorldSession::HandleBattlemasterJoinArena(WorldPacket& recvData)
             TC_LOG_DEBUG("bg.battleground", "Battleground: arena join as group start");
             if (isRated)
             {
-                TC_LOG_DEBUG("bg.battleground", "Battleground: arena team id {}, leader {} queued with matchmaker rating {} for type {}", _player->GetArenaTeamId(arenaslot), _player->GetName(), matchmakerRating, arenatype);
+                TC_LOG_DEBUG("bg.battleground", "Battleground: arena team id {}, leader {} queued with matchmaker rating {} for type {}", _player->GetArenaTeamId(teamSlot), _player->GetName(), matchmakerRating, arenatype);
                 bg->SetRated(true);
             }
             else
@@ -1044,6 +1115,9 @@ void WorldSession::HandleBattlemasterJoinArena(WorldPacket& recvData)
     }
     else
     {
+        // the queue status reads "rated" off the template (a solo rated join
+        // exists only where rated arenas are bot-filled)
+        bg->SetRated(isRated != 0);
         GroupQueueInfo* ginfo = bgQueue.AddGroup(_player, nullptr, bgTypeId, bracketEntry, arenatype, isRated != 0, false, arenaRating, matchmakerRating, ateamId, previousOpponents);
         uint32 avgTime = bgQueue.GetAverageQueueWaitTime(ginfo, bracketEntry->GetBracketId());
         uint32 queueSlot = _player->AddBattlegroundQueueId(bgQueueTypeId);

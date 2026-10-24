@@ -1191,6 +1191,15 @@ bool BattlegroundMgr::IsBotFillSkirmishArena(uint8 arenaType) const
         arenaType == ARENA_TYPE_4v4 || arenaType == ARENA_TYPE_5v5;
 }
 
+bool BattlegroundMgr::IsBotFillRatedArena(uint8 arenaType) const
+{
+    if (!IsBotFillRatedArenaEnabled())
+        return false;
+
+    return arenaType == ARENA_TYPE_2v2 || arenaType == ARENA_TYPE_3v3 ||
+        arenaType == ARENA_TYPE_4v4 || arenaType == ARENA_TYPE_5v5;
+}
+
 // Honor per hour, the same for every kind of match.
 //
 // The end-of-match payout (RewardHonorWinner/Loser) used to be one flat figure

@@ -13,6 +13,7 @@
 #include "AsyncCallbackProcessor.h"
 #include "Custom/custom_barracks_hardcore.h"
 #include "MotionMaster.h"
+#include "Arena.h"
 #include "Battleground.h"
 #include "BattlegroundMgr.h"
 #include "CharacterCache.h"
@@ -1777,7 +1778,9 @@ Player* PlayerbotObcCloneManager::CreateCustomGameClone(Player* source, Battlegr
 
     // The team's start, or in a squad match the corner of the squad on that
     // side with the most seats free - claimed now, so the next clone counts it.
-    Position const* start = bg->TakeStartPosition(clone->GetGUID(), team);
+    // Its talents are already copied, so a squad that wants a healer can tell.
+    bool const healer = bg->GetSquadHealersWanted() && Arena::IsSoloShuffleHealer(clone);
+    Position const* start = bg->TakeStartPosition(clone->GetGUID(), team, healer);
     if (!start)
     {
         bg->ReleaseSquadSeat(clone->GetGUID());

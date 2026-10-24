@@ -665,9 +665,10 @@ void SendArenaBotFillState(Player* player)
     if (!player || !player->GetSession() || player->GetSession()->IsVirtualSession())
         return;
 
-    // A realm that never fills skirmishes has nothing to offer here, and an
-    // unanswered request leaves the box hidden rather than lying about it.
-    if (!sBattlegroundMgr->IsBotFillSkirmishArenaEnabled())
+    // A realm that never fills arenas - skirmish or rated - has nothing to
+    // offer here, and an unanswered request leaves the box hidden rather than
+    // lying about it.
+    if (!sBattlegroundMgr->IsBotFillSkirmishArenaEnabled() && !sBattlegroundMgr->IsBotFillRatedArenaEnabled())
         return;
 
     SendAddonLine(player, Trinity::StringFormat("CCGAME\tARENABOTS:{}", player->HasArenaBotFillOptOut() ? 0 : 1));
@@ -728,10 +729,10 @@ bool HandleAddonRequest(Player* sender, uint32 lang, std::string const& msg)
         return true;
     }
 
-    // The arena bot-fill toggle (Battlegrounds tab): whether a skirmish queue
-    // this character is waiting in may be started as a clone-filled match.
-    // Also realm-agnostic, and answered only where the realm fills skirmishes
-    // at all. The switch is free at any time - it is read when a match is about
+    // The arena bot-fill toggle (Battlegrounds tab): whether a skirmish or
+    // rated arena queue this character is waiting in may be started as a
+    // clone-filled match. Also realm-agnostic, and answered only where the
+    // realm fills arenas at all. The switch is free at any time - it is read when a match is about
     // to be made, so flipping it mid-queue simply decides the next pop.
     static constexpr std::string_view ArenaBotsRequest = "CCGAMEREQ\tARENABOTS";
     if (StringStartsWith(msg, ArenaBotsRequest))

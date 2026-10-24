@@ -23,7 +23,12 @@
 namespace playerbot
 {
 // Pads public battlegrounds and unrated arena skirmishes with transient clones
-// of the managed playerbots. Rated arenas are never filled.
+// of the managed playerbots - and rated arenas where Playerbot.BgFill.RatedArena
+// is on, but only a match the queue started as a bot match: a team it found no
+// real opponent for (BattlegroundQueue::StartBotFilledRatedMatches), or two
+// teams it paired short-handed. A rated match of two whole teams is never
+// touched, and the clones are never an arena team; a team that plays them is
+// scored against its own matchmaker rating (Arena::EndBotFilledRatedMatch).
 //
 // The bots themselves stay out in the world. What enters a Warsong Gulch or a
 // Battle for Gilneas is an in-memory copy of one of them - same gear, talents
@@ -36,7 +41,9 @@ namespace playerbot
 // seat only while the gates are shut (BattlegroundQueue::OfferPreparationSeats):
 // the clone stands down when they arrive and the countdown starts over. Once the
 // gates open the roster is locked. The last person leaving ends a bot-filled
-// match through the stock no-humans rule.
+// match through the stock no-humans rule - in a rated one, as a forfeit by
+// their team (Battleground::RemovePlayerAtLeave). Nobody takes a clone's seat
+// in a rated match.
 //
 // Each half-second the driver visits every live public battleground of an
 // enabled type and, once at least one real player has actually entered, tops

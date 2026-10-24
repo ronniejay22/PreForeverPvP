@@ -84,6 +84,18 @@ bool GroupAllowsArenaBotFill(GroupQueueInfo const* ginfo)
     return true;
 }
 
+// Two rated teams the stock pairing may put together. Whole teams always can.
+// Where rated arenas are bot-filled a team short of the arena size may be
+// paired too - the match is made up with clones - unless somebody on either
+// side has said no to clone-filled arenas.
+bool RatedTeamsCanMeet(GroupQueueInfo const* a, GroupQueueInfo const* b, uint8 arenaType)
+{
+    if (a->Players.size() >= arenaType && b->Players.size() >= arenaType)
+        return true;
+
+    return sBattlegroundMgr->IsBotFillRatedArena(arenaType) && GroupAllowsArenaBotFill(a) && GroupAllowsArenaBotFill(b);
+}
+
 bool GroupHasBotInvitee(GroupQueueInfo const* ginfo)
 {
     if (!ginfo)
@@ -2299,131 +2311,237 @@ void BattlegroundQueue::UpdatePool(BattlegroundTypeId bgTypeId, BattlegroundBrac
     }
     else if (bg_template->isArena())
     {
-        // found out the minimum and maximum ratings the newly added team should battle against
-        // arenaRating is the rating of the latest joined team, or 0
-        // 0 is on (automatic update call) and we must set it to team's with longest wait time
-        if (!arenaRating)
-        {
-            // The front of each list, counting only this pool's teams.
-            auto const firstInPool = [this](GroupsQueueType const& groups) -> GroupQueueInfo*
-            {
-                for (GroupQueueInfo* ginfo : groups)
-                    if (InActivePool(ginfo))
-                        return ginfo;
-                return nullptr;
-            };
+        UpdateRatedPool(bgTypeId, bracketEntry, bracket_id, arenaType, arenaRating);
 
-            GroupQueueInfo* front1 = firstInPool(m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_ALLIANCE]);
-            GroupQueueInfo* front2 = firstInPool(m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_HORDE]);
-            if (front1)
+        // Whoever the stock pairing left waiting is offered a match against
+        // clones once they have waited long enough for a real team to show.
+        if (sBattlegroundMgr->IsBotFillRatedArena(arenaType))
+            StartBotFilledRatedMatches(bgTypeId, bracketEntry, bracket_id, arenaType);
+    }
+}
+
+void BattlegroundQueue::UpdateRatedPool(BattlegroundTypeId bgTypeId, PvPDifficultyEntry const* bracketEntry,
+    BattlegroundBracketId bracket_id, uint8 arenaType, uint32 arenaRating)
+{
+    // found out the minimum and maximum ratings the newly added team should battle against
+    // arenaRating is the rating of the latest joined team, or 0
+    // 0 is on (automatic update call) and we must set it to team's with longest wait time
+    if (!arenaRating)
+    {
+        // The front of each list, counting only this pool's teams.
+        auto const firstInPool = [this](GroupsQueueType const& groups) -> GroupQueueInfo*
+        {
+            for (GroupQueueInfo* ginfo : groups)
+                if (InActivePool(ginfo))
+                    return ginfo;
+            return nullptr;
+        };
+
+        GroupQueueInfo* front1 = firstInPool(m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_ALLIANCE]);
+        GroupQueueInfo* front2 = firstInPool(m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_HORDE]);
+        if (front1)
+            arenaRating = front1->ArenaMatchmakerRating;
+        if (front2)
+            arenaRating = front2->ArenaMatchmakerRating;
+        if (front1 && front2)
+        {
+            if (front1->JoinTime < front2->JoinTime)
                 arenaRating = front1->ArenaMatchmakerRating;
-            if (front2)
-                arenaRating = front2->ArenaMatchmakerRating;
-            if (front1 && front2)
-            {
-                if (front1->JoinTime < front2->JoinTime)
-                    arenaRating = front1->ArenaMatchmakerRating;
-            }
-            else if (!front1 && !front2)
-                return; //queues are empty
         }
+        else if (!front1 && !front2)
+            return; //queues are empty
+    }
 
-        //set rating range
-        uint32 arenaMinRating = (arenaRating <= sBattlegroundMgr->GetMaxRatingDifference()) ? 0 : arenaRating - sBattlegroundMgr->GetMaxRatingDifference();
-        uint32 arenaMaxRating = arenaRating + sBattlegroundMgr->GetMaxRatingDifference();
-        // if max rating difference is set and the time past since server startup is greater than the rating discard time
-        // (after what time the ratings aren't taken into account when making teams) then
-        // the discard time is current_time - time_to_discard, teams that joined after that, will have their ratings taken into account
-        // else leave the discard time on 0, this way all ratings will be discarded
-        // this has to be signed value - when the server starts, this value would be negative and thus overflow
-        int32 discardTime = GameTime::GetGameTimeMS() - sBattlegroundMgr->GetRatingDiscardTimer();
+    //set rating range
+    uint32 arenaMinRating = (arenaRating <= sBattlegroundMgr->GetMaxRatingDifference()) ? 0 : arenaRating - sBattlegroundMgr->GetMaxRatingDifference();
+    uint32 arenaMaxRating = arenaRating + sBattlegroundMgr->GetMaxRatingDifference();
+    // if max rating difference is set and the time past since server startup is greater than the rating discard time
+    // (after what time the ratings aren't taken into account when making teams) then
+    // the discard time is current_time - time_to_discard, teams that joined after that, will have their ratings taken into account
+    // else leave the discard time on 0, this way all ratings will be discarded
+    // this has to be signed value - when the server starts, this value would be negative and thus overflow
+    int32 discardTime = GameTime::GetGameTimeMS() - sBattlegroundMgr->GetRatingDiscardTimer();
 
-        // timer for previous opponents
-        int32 discardOpponentsTime = GameTime::GetGameTimeMS() - sWorld->getIntConfig(CONFIG_ARENA_PREV_OPPONENTS_DISCARD_TIMER);
+    // timer for previous opponents
+    int32 discardOpponentsTime = GameTime::GetGameTimeMS() - sWorld->getIntConfig(CONFIG_ARENA_PREV_OPPONENTS_DISCARD_TIMER);
 
-        // we need to find 2 teams which will play next game
-        GroupsQueueType::iterator itr_teams[PVP_TEAMS_COUNT];
-        uint8 found = 0;
-        uint8 team = 0;
+    // we need to find 2 teams which will play next game
+    GroupsQueueType::iterator itr_teams[PVP_TEAMS_COUNT];
+    uint8 found = 0;
+    uint8 team = 0;
 
-        for (uint8 i = BG_QUEUE_PREMADE_ALLIANCE; i < BG_QUEUE_NORMAL_ALLIANCE; i++)
+    for (uint8 i = BG_QUEUE_PREMADE_ALLIANCE; i < BG_QUEUE_NORMAL_ALLIANCE; i++)
+    {
+        // take the group that joined first
+        GroupsQueueType::iterator itr2 = m_QueuedGroups[bracket_id][i].begin();
+        for (; itr2 != m_QueuedGroups[bracket_id][i].end(); ++itr2)
         {
-            // take the group that joined first
-            GroupsQueueType::iterator itr2 = m_QueuedGroups[bracket_id][i].begin();
-            for (; itr2 != m_QueuedGroups[bracket_id][i].end(); ++itr2)
+            // if group match conditions, then add it to pool
+            if (!(*itr2)->IsInvitedToBGInstanceGUID && InActivePool(*itr2)
+                && (((*itr2)->ArenaMatchmakerRating >= arenaMinRating && (*itr2)->ArenaMatchmakerRating <= arenaMaxRating)
+                    || (int32)(*itr2)->JoinTime < discardTime))
             {
-                // if group match conditions, then add it to pool
-                if (!(*itr2)->IsInvitedToBGInstanceGUID && InActivePool(*itr2)
-                    && (((*itr2)->ArenaMatchmakerRating >= arenaMinRating && (*itr2)->ArenaMatchmakerRating <= arenaMaxRating)
-                        || (int32)(*itr2)->JoinTime < discardTime))
-                {
-                    itr_teams[found++] = itr2;
-                    team = i;
-                    break;
-                }
+                itr_teams[found++] = itr2;
+                team = i;
+                break;
             }
         }
+    }
 
-        if (!found)
+    if (!found)
+        return;
+
+    // The front of each list may not meet - one is short of the arena size and
+    // bots may not make up the difference. The one that has waited longer looks
+    // for an opponent in its own list instead.
+    if (found == 2 && !RatedTeamsCanMeet(*itr_teams[0], *itr_teams[1], arenaType))
+    {
+        if ((*itr_teams[1])->JoinTime < (*itr_teams[0])->JoinTime)
+        {
+            itr_teams[0] = itr_teams[1];
+            team = BG_QUEUE_PREMADE_HORDE;
+        }
+        else
+            team = BG_QUEUE_PREMADE_ALLIANCE;
+        found = 1;
+    }
+
+    if (found == 1)
+    {
+        for (GroupsQueueType::iterator itr3 = itr_teams[0]; itr3 != m_QueuedGroups[bracket_id][team].end(); ++itr3)
+        {
+            if (!(*itr3)->IsInvitedToBGInstanceGUID && InActivePool(*itr3)
+                && (((*itr3)->ArenaMatchmakerRating >= arenaMinRating && (*itr3)->ArenaMatchmakerRating <= arenaMaxRating) || (int32)(*itr3)->JoinTime < discardTime)
+                && ((*itr_teams[0])->ArenaTeamId != (*itr3)->PreviousOpponentsTeamId || ((int32)(*itr3)->JoinTime < discardOpponentsTime))
+                && (*itr_teams[0])->ArenaTeamId != (*itr3)->ArenaTeamId
+                && RatedTeamsCanMeet(*itr_teams[0], *itr3, arenaType))
+            {
+                itr_teams[found++] = itr3;
+                break;
+            }
+        }
+    }
+
+    //if we have 2 teams, then start new arena and invite players!
+    if (found == 2)
+    {
+        GroupQueueInfo* aTeam = *itr_teams[TEAM_ALLIANCE];
+        GroupQueueInfo* hTeam = *itr_teams[TEAM_HORDE];
+        // A team short of the arena size is made up with clones, as a skirmish
+        // would be (RatedTeamsCanMeet allowed it). Both sides are still real
+        // arena teams, so the match is rated exactly as stock.
+        bool const shortHanded = aTeam->Players.size() < arenaType || hTeam->Players.size() < arenaType;
+        bool const hasBotParticipants = shortHanded || GroupHasBotInvitee(aTeam) || GroupHasBotInvitee(hTeam);
+        Battleground* arena = sBattlegroundMgr->CreateNewBattleground(bgTypeId, bracketEntry, arenaType, true,
+            false, hasBotParticipants);
+        if (!arena)
+        {
+            TC_LOG_ERROR("bg.battleground", "BattlegroundQueue::Update couldn't create arena instance for rated arena match!");
             return;
+        }
+        arena->SetTournamentPool(m_ActiveTournamentPool);
+        // before any invite, as TryStartBotFilledMatch does
+        arena->SetBotFillMatch(shortHanded);
 
-        if (found == 1)
+        aTeam->OpponentsTeamRating = hTeam->ArenaTeamRating;
+        hTeam->OpponentsTeamRating = aTeam->ArenaTeamRating;
+        aTeam->OpponentsMatchmakerRating = hTeam->ArenaMatchmakerRating;
+        hTeam->OpponentsMatchmakerRating = aTeam->ArenaMatchmakerRating;
+        TC_LOG_DEBUG("bg.battleground", "setting oposite teamrating for team {} to {}", aTeam->ArenaTeamId, aTeam->OpponentsTeamRating);
+        TC_LOG_DEBUG("bg.battleground", "setting oposite teamrating for team {} to {}", hTeam->ArenaTeamId, hTeam->OpponentsTeamRating);
+
+        // now we must move team if we changed its faction to another faction queue, because then we will spam log by errors in Queue::RemovePlayer
+        if (aTeam->Team != ALLIANCE)
         {
-            for (GroupsQueueType::iterator itr3 = itr_teams[0]; itr3 != m_QueuedGroups[bracket_id][team].end(); ++itr3)
-            {
-                if (!(*itr3)->IsInvitedToBGInstanceGUID && InActivePool(*itr3)
-                    && (((*itr3)->ArenaMatchmakerRating >= arenaMinRating && (*itr3)->ArenaMatchmakerRating <= arenaMaxRating) || (int32)(*itr3)->JoinTime < discardTime)
-                    && ((*itr_teams[0])->ArenaTeamId != (*itr3)->PreviousOpponentsTeamId || ((int32)(*itr3)->JoinTime < discardOpponentsTime))
-                    && (*itr_teams[0])->ArenaTeamId != (*itr3)->ArenaTeamId)
-                {
-                    itr_teams[found++] = itr3;
-                    break;
-                }
-            }
+            m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_ALLIANCE].push_front(aTeam);
+            m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_HORDE].erase(itr_teams[TEAM_ALLIANCE]);
+        }
+        if (hTeam->Team != HORDE)
+        {
+            m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_HORDE].push_front(hTeam);
+            m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_ALLIANCE].erase(itr_teams[TEAM_HORDE]);
         }
 
-        //if we have 2 teams, then start new arena and invite players!
-        if (found == 2)
+        arena->SetArenaMatchmakerRating(ALLIANCE, aTeam->ArenaMatchmakerRating);
+        arena->SetArenaMatchmakerRating(HORDE, hTeam->ArenaMatchmakerRating);
+        InviteGroupToBG(aTeam, arena, ALLIANCE);
+        InviteGroupToBG(hTeam, arena, HORDE);
+
+        TC_LOG_DEBUG("bg.battleground", "Starting rated arena match!");
+        arena->StartBattleground();
+    }
+}
+
+// A rated team the stock pairing found no real opponent for plays clones once it
+// has waited the rated bot-fill wait - the same match a skirmish would be, on
+// the same bot-safe arenas, padded by the same driver. The clones are no arena
+// team: their side's team id stays 0, which is what tells the end of the match
+// (Battleground::GetBotFillRatedTeam) to score the team against an opponent of
+// its own matchmaker rating.
+//
+// Collected before any team is invited, as TryStartBotFilledMatch does.
+void BattlegroundQueue::StartBotFilledRatedMatches(BattlegroundTypeId bgTypeId, PvPDifficultyEntry const* bracketEntry,
+    BattlegroundBracketId bracket_id, uint8 arenaType)
+{
+    uint32 const nowMs = GameTime::GetGameTimeMS();
+    uint32 const waitMs = sBattlegroundMgr->GetBotFillRatedArenaQueueWaitMs();
+
+    std::vector<GroupQueueInfo*> ready;
+    for (uint32 queueIndex : { BG_QUEUE_PREMADE_ALLIANCE, BG_QUEUE_PREMADE_HORDE })
+    {
+        for (GroupQueueInfo* ginfo : m_QueuedGroups[bracket_id][queueIndex])
         {
-            GroupQueueInfo* aTeam = *itr_teams[TEAM_ALLIANCE];
-            GroupQueueInfo* hTeam = *itr_teams[TEAM_HORDE];
-            bool const hasBotParticipants = GroupHasBotInvitee(aTeam) || GroupHasBotInvitee(hTeam);
-            Battleground* arena = sBattlegroundMgr->CreateNewBattleground(bgTypeId, bracketEntry, arenaType, true,
-                false, hasBotParticipants);
-            if (!arena)
-            {
-                TC_LOG_ERROR("bg.battleground", "BattlegroundQueue::Update couldn't create arena instance for rated arena match!");
-                return;
-            }
-            arena->SetTournamentPool(m_ActiveTournamentPool);
+            if (ginfo->IsInvitedToBGInstanceGUID || !ginfo->IsRated || ginfo->ArenaType != arenaType || !InActivePool(ginfo))
+                continue;
 
-            aTeam->OpponentsTeamRating = hTeam->ArenaTeamRating;
-            hTeam->OpponentsTeamRating = aTeam->ArenaTeamRating;
-            aTeam->OpponentsMatchmakerRating = hTeam->ArenaMatchmakerRating;
-            hTeam->OpponentsMatchmakerRating = aTeam->ArenaMatchmakerRating;
-            TC_LOG_DEBUG("bg.battleground", "setting oposite teamrating for team {} to {}", aTeam->ArenaTeamId, aTeam->OpponentsTeamRating);
-            TC_LOG_DEBUG("bg.battleground", "setting oposite teamrating for team {} to {}", hTeam->ArenaTeamId, hTeam->OpponentsTeamRating);
+            if (getMSTimeDiff(ginfo->JoinTime, nowMs) < waitMs)
+                continue;
 
-            // now we must move team if we changed its faction to another faction queue, because then we will spam log by errors in Queue::RemovePlayer
-            if (aTeam->Team != ALLIANCE)
-            {
-                m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_ALLIANCE].push_front(aTeam);
-                m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_HORDE].erase(itr_teams[TEAM_ALLIANCE]);
-            }
-            if (hTeam->Team != HORDE)
-            {
-                m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_HORDE].push_front(hTeam);
-                m_QueuedGroups[bracket_id][BG_QUEUE_PREMADE_ALLIANCE].erase(itr_teams[TEAM_HORDE]);
-            }
+            // A team of managed bots waits as stock, and so does one where
+            // somebody unticked "Arena bots": they are waiting for people.
+            if (!GroupHasRealPlayerInvitee(ginfo) || !GroupAllowsArenaBotFill(ginfo))
+                continue;
 
-            arena->SetArenaMatchmakerRating(ALLIANCE, aTeam->ArenaMatchmakerRating);
-            arena->SetArenaMatchmakerRating(HORDE, hTeam->ArenaMatchmakerRating);
-            InviteGroupToBG(aTeam, arena, ALLIANCE);
-            InviteGroupToBG(hTeam, arena, HORDE);
+            if (!sArenaTeamMgr->GetArenaTeamById(ginfo->ArenaTeamId))
+                continue;
 
-            TC_LOG_DEBUG("bg.battleground", "Starting rated arena match!");
-            arena->StartBattleground();
+            ready.push_back(ginfo);
         }
+    }
+
+    for (GroupQueueInfo* ginfo : ready)
+    {
+        Battleground* arena = sBattlegroundMgr->CreateNewBattleground(bgTypeId, bracketEntry, arenaType, true, false, true);
+        if (!arena)
+        {
+            TC_LOG_ERROR("bg.battleground", "BattlegroundQueue::StartBotFilledRatedMatches - Cannot create a rated arena for arena team {}",
+                ginfo->ArenaTeamId);
+            return;
+        }
+
+        arena->SetTournamentPool(m_ActiveTournamentPool);
+        // before any invite, as TryStartBotFilledMatch does
+        arena->SetBotFillMatch(true);
+
+        // The team keeps the side whose list it waits in, so nothing has to be
+        // moved between lists; the clones take the other side.
+        uint32 const side = ginfo->Team == HORDE ? HORDE : ALLIANCE;
+        uint32 const clones = side == ALLIANCE ? HORDE : ALLIANCE;
+
+        // What a declined invite is charged against (RemovePlayer)
+        ginfo->OpponentsTeamRating = ginfo->ArenaTeamRating;
+        ginfo->OpponentsMatchmakerRating = ginfo->ArenaMatchmakerRating;
+
+        arena->SetArenaMatchmakerRating(side, ginfo->ArenaMatchmakerRating);
+        arena->SetArenaMatchmakerRating(clones, ginfo->ArenaMatchmakerRating);
+        InviteGroupToBG(ginfo, arena, side);
+
+        TC_LOG_DEBUG("bg.battleground", "BattlegroundQueue::StartBotFilledRatedMatches: rated {}v{} instance {} for arena team {} ({} real, mmr {}) against clones.",
+            uint32(arenaType), uint32(arenaType), arena->GetInstanceID(), ginfo->ArenaTeamId, uint32(ginfo->Players.size()),
+            ginfo->ArenaMatchmakerRating);
+
+        arena->StartBattleground();
+        arena->RemoveFromBGFreeSlotQueue();
     }
 }
 

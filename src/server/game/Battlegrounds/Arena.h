@@ -83,6 +83,9 @@ class TC_GAME_API Arena : public Battleground
         // Whether a player plays Buffle Shuffle as a healer: most talent points in
         // a healing tree (Discipline, Holy, Restoration).
         static bool IsSoloShuffleHealer(Player const* player);
+        // The same test on talent points already counted per TalentTab id, for
+        // a character that is not loaded (the bot fill reads them from the DB).
+        static bool IsHealerTalentSpend(std::map<uint32, uint32> const& pointsByTab);
 
         bool IsBetweenRounds() const override;
         bool OwnsPreparationState(Player const* player) const override;
@@ -121,6 +124,10 @@ class TC_GAME_API Arena : public Battleground
         void EndSquadMatch(uint8 winnerSquad, std::string const& announcement);
         // A rated squad match's ratings, by finishing place (ArenaTeam::PlacedAgainst).
         void EndRatedSquadMatch();
+        // A rated match one arena team played against clones (Battleground::
+        // GetBotFillRatedTeam): the team is rated against an opponent of its
+        // own matchmaker rating, which is what the queue gave the clones' side.
+        void EndBotFilledRatedMatch(uint32 winner);
         // One "N Players Remaining" line per squad (ARENA_WORLD_STATE_SQUAD_*),
         // for every squad that is in the match.
         void UpdateSquadWorldStates();

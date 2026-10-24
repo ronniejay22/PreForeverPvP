@@ -17,11 +17,13 @@
 
 #include "PlayerbotBgFillDriver.h"
 
+#include "Arena.h"
 #include "Battleground.h"
 #include "BattlegroundMgr.h"
 #include "BattlegroundQueue.h"
 #include "Configuration/Config.h"
 #include "Containers.h"
+#include "DataStores/DBCStores.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Log.h"
@@ -41,6 +43,7 @@
 
 #include <algorithm>
 #include <array>
+#include <map>
 #include <set>
 #include <shared_mutex>
 #include <string>
@@ -72,6 +75,9 @@ struct BgFillConfig
     uint32 queueWaitMs = 15 * IN_MILLISECONDS;
     bool skirmishArenasEnabled = true;
     uint32 skirmishArenaQueueWaitMs = 0;
+    bool ratedArenasEnabled = false;
+    uint32 ratedArenaQueueWaitMs = 30 * IN_MILLISECONDS;
+    bool ratedArenaAutoCreateTeam = true;
     uint32 maxPerTeam = 15;
     uint32 clonesPerTick = 2;
     bool useOfflineBots = true;
@@ -91,6 +97,12 @@ struct BgFillConfig
     // A weight, not a rule: 0 and 0 deal in plain tier order.
     float classVarietyTeamPenalty = 4.0f;
     float classVarietyMatchPenalty = 1.0f;
+    // Playerbot.BgFill.SkirmishArena.HealersPerTeam / ...OfFive: healers each
+    // side of an arena (each squad in a squad match) is dealt up to, counting
+    // the people there - for teams of two to four, and of five. 0 = roles
+    // play no part.
+    uint32 healersPerTeam = 1;
+    uint32 healersPerTeamOfFive = 2;
 };
 
 BgFillConfig g_Config;
@@ -113,6 +125,7 @@ struct OfflinePool
     uint32 loadedMs = 0;
     std::vector<OfflineCandidate> entries;
     std::unordered_map<uint32, uint8> classByGuid;
+    std::unordered_set<uint32> healers;     // low guids whose active spec heals
 };
 
 OfflinePool g_OfflinePool;
@@ -137,6 +150,11 @@ std::vector<PendingOfflineClone> g_PendingOfflineClones;
 // per match rather than once per tick. Ids are recycled by later matches, so
 // entries are dropped as soon as the id stops naming a live one.
 std::unordered_set<uint32> g_AnnouncedInstances;
+
+// Healers each side (each squad in a squad match) of an arena is dealt up to,
+// settled once when its fill begins (SettleHealerTarget). Pruned with
+// g_AnnouncedInstances.
+std::unordered_map<uint32, uint32> g_HealerTargets;
 
 struct TeamTally
 {
@@ -188,7 +206,16 @@ bool IsFillCandidate(Battleground const* bg, uint32 instanceId)
 {
     // A squad match the queue made of real squads only (BattlegroundQueue::
     // UpdateSquadPool) is closed to bots: its empty corners stay empty.
-    if (!instanceId || !bg || bg->IsCustomGame() || bg->isRated() || bg->IsBotFillRefused())
+    if (!instanceId || !bg || bg->IsCustomGame() || bg->IsBotFillRefused())
+        return false;
+
+    // A rated arena is padded only where the queue started it as a bot match
+    // (BattlegroundQueue::StartBotFilledRatedMatches, or two teams paired
+    // short-handed): one of two whole teams is never touched.
+    if (bg->isArena() && bg->isRated())
+        return bg->IsBotFillMatch() && sBattlegroundMgr->IsBotFillRatedArena(bg->GetArenaType());
+
+    if (bg->isRated())
         return false;
 
     if (bg->isArena())
@@ -309,6 +336,16 @@ uint8 ClassOfSource(ObjectGuid const& guid)
 
     auto const itr = g_OfflinePool.classByGuid.find(guid.GetCounter());
     return itr != g_OfflinePool.classByGuid.end() ? itr->second : 0;
+}
+
+// Whether a source plays a healer, as Buffle Shuffle judges it. A clone copies
+// its source's talents, so the copy answers the same.
+bool IsHealerSource(ObjectGuid const& guid)
+{
+    if (Player const* player = ObjectAccessor::FindConnectedPlayer(guid))
+        return Arena::IsSoloShuffleHealer(player);
+
+    return g_OfflinePool.healers.count(guid.GetCounter()) != 0;
 }
 
 // Classes already seated, or on their way, on one team and in the whole match.
@@ -433,6 +470,7 @@ void RefreshOfflinePoolIfStale(uint32 nowMs)
     g_OfflinePool.loadedMs = nowMs;
     g_OfflinePool.entries.clear();
     g_OfflinePool.classByGuid.clear();
+    g_OfflinePool.healers.clear();
 
     // The random population's accounts plus the PvP-only pool. The PvP-only
     // accounts are deliberately left out of Playerbot.RandomPopulation.BotAccountIds
@@ -474,7 +512,40 @@ void RefreshOfflinePoolIfStale(uint32 nowMs)
         g_OfflinePool.classByGuid[candidate.lowGuid] = candidate.classId;
     } while (result->NextRow());
 
-    TC_LOG_DEBUG("playerbots.bgfill", "PlayerbotBgFillDriver: offline bot pool refreshed, {} characters.", uint32(g_OfflinePool.entries.size()));
+    // Roles, counted the way Arena::IsSoloShuffleHealer counts a loaded
+    // character: the top rank held of every talent in the active spec, summed
+    // per tree. The level-60 pool is never online, so this is the only way to
+    // tell its healers before one is dealt.
+    if (QueryResult talents = CharacterDatabase.PQuery(
+        "SELECT ct.guid, ct.spell FROM character_talent ct JOIN characters c ON c.guid = ct.guid AND ct.talentGroup = c.activeTalentGroup "
+        "WHERE c.online = 0 AND c.account IN ({}) AND c.name NOT LIKE 'Obcc%'", accountList))
+    {
+        std::unordered_map<uint32, std::map<uint32, uint32>> ranksByTalent;
+        do
+        {
+            Field* fields = talents->Fetch();
+            TalentSpellPos const* pos = GetTalentSpellPos(fields[1].GetUInt32());
+            if (!pos)
+                continue;
+
+            uint32& ranks = ranksByTalent[fields[0].GetUInt32()][pos->talent_id];
+            ranks = std::max<uint32>(ranks, uint32(pos->rank) + 1);
+        } while (talents->NextRow());
+
+        for (auto const& [lowGuid, talentRanks] : ranksByTalent)
+        {
+            std::map<uint32, uint32> pointsByTab;
+            for (auto const& [talentId, ranks] : talentRanks)
+                if (TalentEntry const* talent = sTalentStore.LookupEntry(talentId))
+                    pointsByTab[talent->TabID] += ranks;
+
+            if (Arena::IsHealerTalentSpend(pointsByTab))
+                g_OfflinePool.healers.insert(lowGuid);
+        }
+    }
+
+    TC_LOG_DEBUG("playerbots.bgfill", "PlayerbotBgFillDriver: offline bot pool refreshed, {} characters, {} of them healers.",
+        uint32(g_OfflinePool.entries.size()), uint32(g_OfflinePool.healers.size()));
 }
 
 std::vector<ObjectGuid> CollectOfflineSources(uint32 minLevel, uint32 maxLevel, std::unordered_set<ObjectGuid> const& excluded)
@@ -590,11 +661,161 @@ void ShedClonesFromTeam(Battleground* bg, uint32 team, uint32 count,
     }
 }
 
+// Healers on one team: everyone seated (people, bots, clones) and every copy
+// still loading for it.
+uint32 CountHealers(Battleground const* bg, uint32 team)
+{
+    uint32 count = 0;
+    for (auto const& [guid, bgPlayer] : bg->GetPlayers())
+        if (bgPlayer.Team == team && Arena::IsSoloShuffleHealer(ObjectAccessor::FindConnectedPlayer(guid)))
+            ++count;
+
+    for (PendingOfflineClone const& pending : g_PendingOfflineClones)
+        if (pending.instanceId == bg->GetInstanceID() && pending.team == team && IsHealerSource(pending.sourceGuid))
+            ++count;
+
+    return count;
+}
+
+// The configured healers for one team of an arena - one squad in a squad
+// match, whose side holds several - or 0 where roles play no part.
+uint32 ConfiguredHealersPerTeam(Battleground const* bg)
+{
+    if (!bg->isArena())
+        return 0;
+
+    uint32 const size = bg->IsSquadMatch() ? bg->GetSquadSize() : bg->GetArenaType();
+    return size >= 5 ? g_Config.healersPerTeamOfFive : g_Config.healersPerTeam;
+}
+
+uint32 SquadsPerSide(Battleground const* bg)
+{
+    return bg->IsSquadMatch() ? std::max<uint32>(bg->GetSquadCount() / PVP_TEAMS_COUNT, 1) : 1;
+}
+
+// How many healers each team of an arena gets: the configured number or,
+// where the bracket has too few healer bots left to give every team that many,
+// the most they all can have. Nobody seated is taken away, so a side already
+// holding more lifts the number for the other. Settled once, when the fill
+// begins, so a scarce bracket is not decided one seat at a time.
+uint32 SettleHealerTarget(Battleground* bg, MatchTally const& tally, std::unordered_set<ObjectGuid> const& usedSources, uint32 nowMs)
+{
+    uint32 const configured = ConfiguredHealersPerTeam(bg);
+    uint32 const squads = SquadsPerSide(bg);
+    uint32 const cap = FillCapForMatch(bg);
+
+    uint32 have[PVP_TEAMS_COUNT] = {};
+    uint32 open[PVP_TEAMS_COUNT] = {};
+    for (uint32 teamIndex = TEAM_ALLIANCE; teamIndex < PVP_TEAMS_COUNT; ++teamIndex)
+    {
+        uint32 const team = teamIndex == TEAM_ALLIANCE ? ALLIANCE : HORDE;
+        TeamTally const& side = tally.teams[teamIndex];
+        uint32 const taken = side.humans + side.virtualBots + bg->GetInvitedCount(team);
+        uint32 const desired = cap > taken ? cap - taken : 0;
+        uint32 const present = side.clones + CountPendingOfflineClones(bg->GetInstanceID(), team);
+        have[teamIndex] = CountHealers(bg, team);
+        open[teamIndex] = desired > present ? desired - present : 0;
+    }
+
+    uint32 const minLevel = bg->GetMinLevel();
+    uint32 const maxLevel = std::max(bg->GetMaxLevel(), minLevel);
+    std::vector<ObjectGuid> sources = CollectOnlineSources(minLevel, maxLevel, usedSources);
+    if (g_Config.useOfflineBots)
+    {
+        RefreshOfflinePoolIfStale(nowMs);
+        std::vector<ObjectGuid> const offline = CollectOfflineSources(minLevel, maxLevel, usedSources);
+        sources.insert(sources.end(), offline.begin(), offline.end());
+    }
+    uint32 const available = uint32(std::count_if(sources.begin(), sources.end(), IsHealerSource));
+
+    auto const reachable = [&](uint32 perSide)
+    {
+        uint32 needed = 0;
+        for (uint32 teamIndex = TEAM_ALLIANCE; teamIndex < PVP_TEAMS_COUNT; ++teamIndex)
+        {
+            uint32 const missing = perSide > have[teamIndex] ? perSide - have[teamIndex] : 0;
+            if (missing > open[teamIndex])
+                return false;
+            needed += missing;
+        }
+        return needed <= available;
+    };
+
+    uint32 const mostHeld = std::max(have[TEAM_ALLIANCE], have[TEAM_HORDE]);
+    uint32 const lowest = (mostHeld + squads - 1) / squads;
+    uint32 target = std::max(configured, lowest);
+    while (target > lowest && !reachable(target * squads))
+        --target;
+
+    if (bg->IsSquadMatch())
+        bg->SetSquadHealersWanted(uint8(std::min<uint32>(target, 255)));
+
+    TC_LOG_INFO("playerbots.bgfill", "PlayerbotBgFillDriver: {} instance {} deals {} healer(s) a {} ({} configured); healers seated: alliance {}, horde {}; {} healer bot(s) free in levels {}-{}.",
+        bg->GetName(), bg->GetInstanceID(), target, bg->IsSquadMatch() ? "squad" : "side", configured,
+        have[TEAM_ALLIANCE], have[TEAM_HORDE], available, minLevel, maxLevel);
+    if (!reachable(target * squads))
+        TC_LOG_WARN("playerbots.bgfill", "PlayerbotBgFillDriver: instance {} cannot give both sides {} healer(s); they will not match.",
+            bg->GetInstanceID(), target);
+    else if (target < configured)
+        TC_LOG_WARN("playerbots.bgfill", "PlayerbotBgFillDriver: instance {} has too few healer bots for {} a {}; dealing {}.",
+            bg->GetInstanceID(), configured, bg->IsSquadMatch() ? "squad" : "side", target);
+
+    return target;
+}
+
+// A team's sources by role: the healers and everyone else, each in the usual
+// tier and variety order. Dealt without roles, everyone is in `others`.
+struct SourceDeck
+{
+    std::vector<ObjectGuid> healers;
+    std::vector<ObjectGuid> others;
+};
+
+SourceDeck MakeDeck(std::vector<ObjectGuid> sources, uint8 matchTier, ClassMix const& mix, uint32 draws, bool byRole)
+{
+    SourceDeck deck;
+    if (byRole)
+    {
+        auto const split = std::stable_partition(sources.begin(), sources.end(), IsHealerSource);
+        deck.healers.assign(sources.begin(), split);
+        sources.erase(sources.begin(), split);
+        OrderSourcesByTier(deck.healers, matchTier);
+        OrderSourcesForVariety(deck.healers, matchTier, mix, draws);
+    }
+
+    deck.others = std::move(sources);
+    OrderSourcesByTier(deck.others, matchTier);
+    OrderSourcesForVariety(deck.others, matchTier, mix, draws);
+    return deck;
+}
+
+// The next source for a seat: one of the role wanted or, with `anyRole`, of
+// the other once that has run out. Nothing when the deck is spent.
+Optional<ObjectGuid> DrawSource(SourceDeck& deck, bool healer, bool anyRole)
+{
+    std::vector<ObjectGuid>* const wanted = healer ? &deck.healers : &deck.others;
+    std::vector<ObjectGuid>* const other = healer ? &deck.others : &deck.healers;
+    for (std::vector<ObjectGuid>* pile : { wanted, anyRole ? other : nullptr })
+    {
+        if (!pile || pile->empty())
+            continue;
+
+        ObjectGuid const guid = pile->front();
+        pile->erase(pile->begin());
+        return guid;
+    }
+
+    return {};
+}
+
 // Seat up to `wanted` clones on one team. Returns how many were created or
 // requested. `matchClones` and `totalClones` feed the governor and are
-// advanced as seats are taken.
+// advanced as seats are taken. With `healersNeeded` (an arena), a seat goes
+// to a healer while the team still needs one and to anyone else after that;
+// healers come first, so a fill spread over several ticks lands on the count.
 uint32 AddClonesToTeam(Battleground* bg, uint32 team, uint32 wanted, MatchTally const& tally,
-    std::unordered_set<ObjectGuid>& usedSources, uint32& matchClones, uint32& totalClones, uint32 nowMs)
+    std::unordered_set<ObjectGuid>& usedSources, uint32& matchClones, uint32& totalClones, uint32 nowMs,
+    Optional<uint32> healersNeeded = {})
 {
     if (!wanted)
         return 0;
@@ -619,69 +840,116 @@ uint32 AddClonesToTeam(Battleground* bg, uint32 team, uint32 wanted, MatchTally 
     uint32 const draws = wanted * 2 + 2;
     ClassMix mix = CountClasses(bg, team);
 
-    // 1. Online bots in the bracket.
-    std::vector<ObjectGuid> online = CollectOnlineSources(minLevel, maxLevel, usedSources);
-    OrderSourcesByTier(online, matchTier);
-    OrderSourcesForVariety(online, matchTier, mix, draws);
-    for (ObjectGuid const& sourceGuid : online)
+    auto const wantsHealer = [&]() { return healersNeeded && *healersNeeded > 0; };
+    uint32 offRole = 0;
+    auto const seated = [&](ObjectGuid const& sourceGuid, uint8 classId)
     {
-        if (added >= wanted || !governorAllows())
-            return added;
-
-        Player* source = ObjectAccessor::FindConnectedPlayer(sourceGuid);
-        if (!source)
-            continue;
-
-        // Managed bots keep their own names; "Dark" is reserved for a copy of
-        // a real person, as in the Violet Hold waves.
-        Player* clone = playerbot::PlayerbotObcCloneManager::CreateCustomGameClone(source, bg, team, "");
-        if (!clone)
+        if (healersNeeded)
         {
-            TC_LOG_WARN("playerbots.bgfill", "PlayerbotBgFillDriver: failed to clone {} into instance {}.", source->GetName(), bg->GetInstanceID());
-            continue;
+            bool const healer = IsHealerSource(sourceGuid);
+            if (healer != wantsHealer())
+                ++offRole;
+            if (healer && wantsHealer())
+                --*healersNeeded;
         }
 
         usedSources.insert(sourceGuid);
-        mix.Add(source->GetClass(), true);
+        mix.Add(classId, true);
         ++added;
         ++matchClones;
         ++totalClones;
-        TC_LOG_DEBUG("playerbots.bgfill", "PlayerbotBgFillDriver: seated {} (copy of online bot {}) on team {} of instance {}.",
-            clone->GetName(), source->GetName(), team, bg->GetInstanceID());
-    }
+    };
+
+    // 1. Online bots in the bracket.
+    SourceDeck online = MakeDeck(CollectOnlineSources(minLevel, maxLevel, usedSources), matchTier, mix, draws, healersNeeded.has_value());
+    auto const seatOnline = [&](bool anyRole)
+    {
+        while (added < wanted && governorAllows())
+        {
+            Optional<ObjectGuid> const sourceGuid = DrawSource(online, wantsHealer(), anyRole);
+            if (!sourceGuid)
+                return;
+
+            Player* source = ObjectAccessor::FindConnectedPlayer(*sourceGuid);
+            if (!source)
+                continue;
+
+            // Managed bots keep their own names; "Dark" is reserved for a copy of
+            // a real person, as in the Violet Hold waves.
+            Player* clone = playerbot::PlayerbotObcCloneManager::CreateCustomGameClone(source, bg, team, "");
+            if (!clone)
+            {
+                TC_LOG_WARN("playerbots.bgfill", "PlayerbotBgFillDriver: failed to clone {} into instance {}.", source->GetName(), bg->GetInstanceID());
+                continue;
+            }
+
+            seated(*sourceGuid, source->GetClass());
+            TC_LOG_DEBUG("playerbots.bgfill", "PlayerbotBgFillDriver: seated {} (copy of online bot {}) on team {} of instance {}.",
+                clone->GetName(), source->GetName(), team, bg->GetInstanceID());
+        }
+    };
 
     // 2. Offline characters from the bot accounts, loaded in the background.
-    if (added < wanted && g_Config.useOfflineBots)
+    // Read on first need, after the online pass has had its go.
+    SourceDeck offline;
+    WorldSession* callbackSession = nullptr;
+    bool offlineRead = false;
+    auto const seatOffline = [&](bool anyRole)
     {
-        RefreshOfflinePoolIfStale(nowMs);
-        std::vector<ObjectGuid> offline = CollectOfflineSources(minLevel, maxLevel, usedSources);
-        OrderSourcesByTier(offline, matchTier);
-        OrderSourcesForVariety(offline, matchTier, mix, draws);
-        WorldSession* callbackSession = offline.empty() ? nullptr : FindCallbackSession(tally, teamIndex);
-        for (ObjectGuid const& sourceGuid : offline)
-        {
-            if (added >= wanted || !callbackSession || !governorAllows())
-                break;
+        if (added >= wanted || !g_Config.useOfflineBots)
+            return;
 
-            if (!playerbot::PlayerbotObcCloneManager::QueueCustomGameClone(sourceGuid, callbackSession, bg, team, ""))
+        if (!offlineRead)
+        {
+            offlineRead = true;
+            RefreshOfflinePoolIfStale(nowMs);
+            offline = MakeDeck(CollectOfflineSources(minLevel, maxLevel, usedSources), matchTier, mix, draws, healersNeeded.has_value());
+            if (!offline.healers.empty() || !offline.others.empty())
+                callbackSession = FindCallbackSession(tally, teamIndex);
+        }
+
+        while (added < wanted && callbackSession && governorAllows())
+        {
+            Optional<ObjectGuid> const sourceGuid = DrawSource(offline, wantsHealer(), anyRole);
+            if (!sourceGuid)
+                return;
+
+            if (!playerbot::PlayerbotObcCloneManager::QueueCustomGameClone(*sourceGuid, callbackSession, bg, team, ""))
                 continue;
 
             PendingOfflineClone pending;
             pending.instanceId = bg->GetInstanceID();
             pending.team = team;
-            pending.sourceGuid = sourceGuid;
+            pending.sourceGuid = *sourceGuid;
             pending.requestedMs = nowMs;
             g_PendingOfflineClones.push_back(pending);
 
-            usedSources.insert(sourceGuid);
-            mix.Add(ClassOfSource(sourceGuid), true);
-            ++added;
-            ++matchClones;
-            ++totalClones;
+            seated(*sourceGuid, ClassOfSource(*sourceGuid));
             TC_LOG_DEBUG("playerbots.bgfill", "PlayerbotBgFillDriver: requested a copy of offline character {} for team {} of instance {}.",
-                sourceGuid.ToString(), team, bg->GetInstanceID());
+                sourceGuid->ToString(), team, bg->GetInstanceID());
         }
+    };
+
+    // The role wanted changes at most once (healers, then everyone else), so
+    // two rounds through both pools seat every seat a role can have. A role
+    // the bracket has run out of leaves its seats to the other, so the match
+    // still fills; the settled target makes that rare.
+    for (int round = 0; round < 2; ++round)
+    {
+        seatOnline(false);
+        seatOffline(false);
     }
+    if (healersNeeded)
+    {
+        seatOnline(true);
+        seatOffline(true);
+    }
+    if (offRole)
+        TC_LOG_WARN("playerbots.bgfill", "PlayerbotBgFillDriver: ran out of {} bots in levels {}-{}; {} seat(s) on team {} of instance {} went to the other role.",
+            wantsHealer() ? "healer" : "non-healer", minLevel, maxLevel, offRole, team, bg->GetInstanceID());
+
+    if (!governorAllows())
+        return added;
 
     // 2b. The pool is spent and the battleground is bigger than it: deal
     // characters in again. Fewest copies on this team first, then fewest in
@@ -802,10 +1070,7 @@ uint32 AddClonesToTeam(Battleground* bg, uint32 team, uint32 wanted, MatchTally 
             if (!clone)
                 continue;
 
-            usedSources.insert(humanGuid);
-            ++added;
-            ++matchClones;
-            ++totalClones;
+            seated(humanGuid, human->GetClass());
             TC_LOG_DEBUG("playerbots.bgfill", "PlayerbotBgFillDriver: no bot fits levels {}-{}; seated a mirror of {} on team {} of instance {}.",
                 minLevel, maxLevel, human->GetName(), team, bg->GetInstanceID());
         }
@@ -832,7 +1097,8 @@ std::vector<LiveMatch> CollectLiveMatches()
         BattlegroundQueueTypeId const queueTypeId = BattlegroundQueueTypeId(queueType);
         BattlegroundTypeId const bgTypeId = BattlegroundMgr::BGTemplateId(queueTypeId);
         uint8 const arenaType = BattlegroundMgr::BGArenaType(queueTypeId);
-        if (arenaType ? !sBattlegroundMgr->IsBotFillSkirmishArena(arenaType) : !sBattlegroundMgr->IsBotFillBattleground(bgTypeId))
+        if (arenaType ? !sBattlegroundMgr->IsBotFillSkirmishArena(arenaType) && !sBattlegroundMgr->IsBotFillRatedArena(arenaType)
+                      : !sBattlegroundMgr->IsBotFillBattleground(bgTypeId))
             continue;
 
         BattlegroundContainer const* instances = sBattlegroundMgr->GetBattlegroundsByType(bgTypeId);
@@ -915,6 +1181,17 @@ void FillMatch(LiveMatch& match, uint32& totalClones, uint32 nowMs)
         (bg->GetStatus() == STATUS_WAIT_JOIN || bg->GetStatus() == STATUS_IN_PROGRESS);
     bool const arenaAdditionsLocked = bg->isArena() && bg->GetStatus() != STATUS_WAIT_JOIN;
 
+    // An arena deals roles too: each side up to the healers settled for it
+    // (per squad in a squad match, so a side holds that many times its squads).
+    Optional<uint32> sideHealers;
+    if (ConfiguredHealersPerTeam(bg))
+    {
+        auto const [itr, settling] = g_HealerTargets.try_emplace(match.instanceId, 0);
+        if (settling)
+            itr->second = SettleHealerTarget(bg, match.tally, usedSources, nowMs);
+        sideHealers = itr->second * SquadsPerSide(bg);
+    }
+
     for (uint32 teamIndex = TEAM_ALLIANCE; teamIndex < PVP_TEAMS_COUNT; ++teamIndex)
     {
         uint32 const team = teamIndex == TEAM_ALLIANCE ? ALLIANCE : HORDE;
@@ -931,7 +1208,13 @@ void FillMatch(LiveMatch& match, uint32& totalClones, uint32 nowMs)
         else if (present < desired && !arenaAdditionsLocked)
         {
             uint32 const wanted = std::min(desired - present, std::max<uint32>(g_Config.clonesPerTick, 1));
-            AddClonesToTeam(bg, team, wanted, match.tally, usedSources, matchClones, totalClones, nowMs);
+            Optional<uint32> healersNeeded;
+            if (sideHealers)
+            {
+                uint32 const have = CountHealers(bg, team);
+                healersNeeded = *sideHealers > have ? *sideHealers - have : 0;
+            }
+            AddClonesToTeam(bg, team, wanted, match.tally, usedSources, matchClones, totalClones, nowMs, healersNeeded);
         }
     }
 
@@ -960,6 +1243,12 @@ void ShedForGovernor(std::vector<LiveMatch> const& matches)
 // The queue only re-examines a bracket when something happens in it or on its
 // fifteen-second sweep. A person whose wait has run out deserves better than
 // the sweep, so nudge the queue for them.
+//
+// An arena queue holds skirmish parties and rated teams side by side, and the
+// queue tells which pass to run by the rating it is handed: 0 is the skirmish
+// pass, anything else the rated one (BattlegroundMgr::Update). A rated team
+// is woken with its own matchmaker rating, so its bot match does not hang on
+// the forced rated update, which Arena.MaxRatingDifference = 0 turns off.
 void WakeQueuesForWaitingPlayers(uint32 nowMs)
 {
     for (int queueType = BATTLEGROUND_QUEUE_NONE + 1; queueType < MAX_BATTLEGROUND_QUEUE_TYPES; ++queueType)
@@ -967,21 +1256,31 @@ void WakeQueuesForWaitingPlayers(uint32 nowMs)
         BattlegroundQueueTypeId const queueTypeId = BattlegroundQueueTypeId(queueType);
         BattlegroundTypeId const bgTypeId = BattlegroundMgr::BGTemplateId(queueTypeId);
         uint8 const arenaType = BattlegroundMgr::BGArenaType(queueTypeId);
-        if (arenaType ? !sBattlegroundMgr->IsBotFillSkirmishArena(arenaType) : !sBattlegroundMgr->IsBotFillBattleground(bgTypeId))
+        bool const fillsSkirmish = arenaType ? sBattlegroundMgr->IsBotFillSkirmishArena(arenaType) : sBattlegroundMgr->IsBotFillBattleground(bgTypeId);
+        // only All Arenas: a rated squad match has queues of its own and is never filled
+        bool const fillsRated = arenaType && bgTypeId == BATTLEGROUND_AA && sBattlegroundMgr->IsBotFillRatedArena(arenaType);
+        if (!fillsSkirmish && !fillsRated)
             continue;
 
         uint32 const queueWaitMs = sBattlegroundMgr->GetBotFillQueueWaitMs(arenaType);
+        uint32 const ratedWaitMs = sBattlegroundMgr->GetBotFillRatedArenaQueueWaitMs();
 
         BattlegroundQueue& queue = sBattlegroundMgr->GetBattlegroundQueue(queueTypeId);
         for (uint32 bracket = BG_BRACKET_ID_FIRST; bracket < MAX_BATTLEGROUND_BRACKETS; ++bracket)
         {
-            bool wake = false;
-            for (uint32 index = BG_QUEUE_PREMADE_ALLIANCE; index < BG_QUEUE_GROUP_TYPES_COUNT && !wake; ++index)
+            bool wakeUnrated = false;
+            uint32 wakeRatedMmr = 0;
+            for (uint32 index = BG_QUEUE_PREMADE_ALLIANCE; index < BG_QUEUE_GROUP_TYPES_COUNT; ++index)
             {
                 for (GroupQueueInfo const* ginfo : queue.m_QueuedGroups[bracket][index])
                 {
-                    if (ginfo->IsInvitedToBGInstanceGUID || ginfo->IsRated ||
-                        (arenaType && ginfo->ArenaType != arenaType) || getMSTimeDiff(ginfo->JoinTime, nowMs) < queueWaitMs)
+                    if (ginfo->IsInvitedToBGInstanceGUID || (arenaType && ginfo->ArenaType != arenaType))
+                        continue;
+
+                    if (ginfo->IsRated ? (!fillsRated || wakeRatedMmr) : (!fillsSkirmish || wakeUnrated))
+                        continue;
+
+                    if (getMSTimeDiff(ginfo->JoinTime, nowMs) < (ginfo->IsRated ? ratedWaitMs : queueWaitMs))
                         continue;
 
                     for (auto const& [playerGuid, playerInfo] : ginfo->Players)
@@ -995,18 +1294,20 @@ void WakeQueuesForWaitingPlayers(uint32 nowMs)
                         if (session && !session->IsVirtualSession() &&
                             !(arenaType && player->HasArenaBotFillOptOut()))
                         {
-                            wake = true;
+                            if (ginfo->IsRated)
+                                wakeRatedMmr = std::max<uint32>(ginfo->ArenaMatchmakerRating, 1);
+                            else
+                                wakeUnrated = true;
                             break;
                         }
                     }
-
-                    if (wake)
-                        break;
                 }
             }
 
-            if (wake)
+            if (wakeUnrated)
                 sBattlegroundMgr->ScheduleQueueUpdate(0, arenaType, queueTypeId, bgTypeId, BattlegroundBracketId(bracket));
+            if (wakeRatedMmr)
+                sBattlegroundMgr->ScheduleQueueUpdate(wakeRatedMmr, arenaType, queueTypeId, bgTypeId, BattlegroundBracketId(bracket));
         }
     }
 }
@@ -1060,6 +1361,10 @@ void PlayerbotBgFillDriver::LoadConfig()
     config.skirmishArenasEnabled = sConfigMgr->GetBoolDefault("Playerbot.BgFill.SkirmishArena.Enable", true);
     config.skirmishArenaQueueWaitMs = uint32(std::max<int32>(
         sConfigMgr->GetIntDefault("Playerbot.BgFill.SkirmishArena.QueueWaitSeconds", 0), 0)) * IN_MILLISECONDS;
+    config.ratedArenasEnabled = sConfigMgr->GetBoolDefault("Playerbot.BgFill.RatedArena.Enable", false);
+    config.ratedArenaQueueWaitMs = uint32(std::max<int32>(
+        sConfigMgr->GetIntDefault("Playerbot.BgFill.RatedArena.QueueWaitSeconds", 30), 0)) * IN_MILLISECONDS;
+    config.ratedArenaAutoCreateTeam = sConfigMgr->GetBoolDefault("Playerbot.BgFill.RatedArena.AutoCreateTeam", true);
     config.maxPerTeam = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.MaxPerTeam", 15), 0));
     config.clonesPerTick = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.ClonesPerTick", 2), 1));
     config.useOfflineBots = sConfigMgr->GetBoolDefault("Playerbot.BgFill.UseOfflineBots", true);
@@ -1068,6 +1373,8 @@ void PlayerbotBgFillDriver::LoadConfig()
     config.duplicateMaxPerTeam = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.DuplicateSources.MaxPerTeam", 0), 0));
     config.classVarietyTeamPenalty = std::max(sConfigMgr->GetFloatDefault("Playerbot.BgFill.ClassVariety.TeamPenalty", 4.0f), 0.0f);
     config.classVarietyMatchPenalty = std::max(sConfigMgr->GetFloatDefault("Playerbot.BgFill.ClassVariety.MatchPenalty", 1.0f), 0.0f);
+    config.healersPerTeam = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.SkirmishArena.HealersPerTeam", 1), 0));
+    config.healersPerTeamOfFive = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.SkirmishArena.HealersPerTeamOfFive", 2), 0));
 
     std::string const types = sConfigMgr->GetStringDefault("Playerbot.BgFill.BattlegroundTypes", "");
     for (std::string_view token : Trinity::Tokenize(types, ',', false))
@@ -1110,6 +1417,9 @@ void PlayerbotBgFillDriver::LoadConfig()
     policy.queueWaitMs = g_Config.queueWaitMs;
     policy.skirmishArenasEnabled = g_Config.skirmishArenasEnabled;
     policy.skirmishArenaQueueWaitMs = g_Config.skirmishArenaQueueWaitMs;
+    policy.ratedArenasEnabled = g_Config.ratedArenasEnabled;
+    policy.ratedArenaQueueWaitMs = g_Config.ratedArenaQueueWaitMs;
+    policy.ratedArenaAutoCreateTeam = g_Config.ratedArenaAutoCreateTeam;
     sBattlegroundMgr->SetBotFillPolicy(std::move(policy));
 
     if (g_Config.enabled)
@@ -1119,9 +1429,11 @@ void PlayerbotBgFillDriver::LoadConfig()
             TC_LOG_WARN("server.loading", "Playerbot battleground fill is enabled but the PvP core/lifecycle modules are off; clones would stand idle.");
     }
 
-    TC_LOG_INFO("server.loading", "Playerbot battleground fill config: enabled={}, types={}, queueWait={} ms, skirmishArenas={}, skirmishQueueWait={} ms, maxPerTeam={}, clonesPerTick={}, offlineBots={}, humanMirrors={}, duplicatesFromTeamSize={}, duplicateMaxPerTeam={}, classVariety={}/{}.",
+    TC_LOG_INFO("server.loading", "Playerbot battleground fill config: enabled={}, types={}, queueWait={} ms, skirmishArenas={}, skirmishQueueWait={} ms, ratedArenas={}, ratedQueueWait={} ms, ratedAutoTeam={}, skirmishHealers={}/{}, maxPerTeam={}, clonesPerTick={}, offlineBots={}, humanMirrors={}, duplicatesFromTeamSize={}, duplicateMaxPerTeam={}, classVariety={}/{}.",
         g_Config.enabled ? "true" : "false", g_Config.battlegroundTypes.empty() ? "all" : types,
         g_Config.queueWaitMs, g_Config.skirmishArenasEnabled ? "true" : "false", g_Config.skirmishArenaQueueWaitMs,
+        g_Config.ratedArenasEnabled ? "true" : "false", g_Config.ratedArenaQueueWaitMs, g_Config.ratedArenaAutoCreateTeam ? "true" : "false",
+        g_Config.healersPerTeam, g_Config.healersPerTeamOfFive,
         g_Config.maxPerTeam, g_Config.clonesPerTick,
         g_Config.useOfflineBots ? "true" : "false", g_Config.allowHumanMirrors ? "true" : "false",
         g_Config.duplicateMinTeamSize, g_Config.duplicateMaxPerTeam,
@@ -1166,6 +1478,13 @@ void PlayerbotBgFillDriver::OnWorldUpdate(uint32 diffMs)
     {
         if (liveIds.find(*itr) == liveIds.end())
             itr = g_AnnouncedInstances.erase(itr);
+        else
+            ++itr;
+    }
+    for (auto itr = g_HealerTargets.begin(); itr != g_HealerTargets.end();)
+    {
+        if (liveIds.find(itr->first) == liveIds.end())
+            itr = g_HealerTargets.erase(itr);
         else
             ++itr;
     }

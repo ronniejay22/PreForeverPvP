@@ -40,6 +40,11 @@ public:
     void AddArenaTeam(ArenaTeam* arenaTeam);
     void RemoveArenaTeam(uint32 Id);
 
+    // A team of one, for a character queueing a rated arena alone on a realm
+    // that fills rated arenas with clones. Null when it already has a team of
+    // that size or no name could be found for one.
+    ArenaTeam* CreateSoloArenaTeam(Player* captain, uint8 type);
+
     ArenaTeamContainer const& GetArenaTeams() const { return ArenaTeamStore; }
 
     void DistributeArenaPoints();

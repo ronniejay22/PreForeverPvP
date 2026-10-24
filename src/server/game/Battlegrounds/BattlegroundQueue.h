@@ -161,6 +161,16 @@ class TC_GAME_API BattlegroundQueue
         // (Battleground::CountPreparationSeatsHeldByClones).
         void OfferPreparationSeats(BattlegroundTypeId bgTypeId, BattlegroundBracketId bracket_id, uint8 arenaType,
             uint32 queueWaitMs);
+        // The stock rated pairing: two arena teams within each other's rating
+        // window. Where rated arenas are bot-filled a team short of the arena
+        // size may be paired too, and the match is padded to size.
+        void UpdateRatedPool(BattlegroundTypeId bgTypeId, PvPDifficultyEntry const* bracketEntry,
+            BattlegroundBracketId bracket_id, uint8 arenaType, uint32 arenaRating);
+        // What UpdateRatedPool could not pair, once it has waited the rated
+        // bot-fill wait: each team gets a rated match of its own against
+        // clones, which count as an opponent of the team's own rating.
+        void StartBotFilledRatedMatches(BattlegroundTypeId bgTypeId, PvPDifficultyEntry const* bracketEntry,
+            BattlegroundBracketId bracket_id, uint8 arenaType);
         // After ginfo->Team has been switched: moves the group to that side's
         // list, premade or normal as it was.
         void MoveGroupToSeatedSide(GroupQueueInfo* ginfo, BattlegroundBracketId bracket_id);

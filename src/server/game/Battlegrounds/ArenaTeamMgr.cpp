@@ -23,6 +23,8 @@
 #include "Language.h"
 #include "Player.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
+#include "StringFormat.h"
 
 ArenaTeamMgr::ArenaTeamMgr()
 {
@@ -76,6 +78,52 @@ void ArenaTeamMgr::AddArenaTeam(ArenaTeam* arenaTeam)
 void ArenaTeamMgr::RemoveArenaTeam(uint32 arenaTeamId)
 {
     ArenaTeamStore.erase(arenaTeamId);
+}
+
+// Named after the character and the size - "Baku 2v2" - then numbered when that
+// is taken, then by guid when the character's name leaves no room for either
+// within a charter name. Made the way `.arena create` makes a team: the captain
+// is its only member and its emblem is that command's.
+ArenaTeam* ArenaTeamMgr::CreateSoloArenaTeam(Player* captain, uint8 type)
+{
+    if (!captain)
+        return nullptr;
+
+    uint8 const slot = ArenaTeam::GetSlotByType(type);
+    if (slot >= MAX_ARENA_SLOT || captain->GetArenaTeamId(slot))
+        return nullptr;
+
+    auto const nameFor = [captain, type](uint32 attempt) -> std::string
+    {
+        if (attempt == 1)
+            return Trinity::StringFormat("{} {}v{}", captain->GetName(), uint32(type), uint32(type));
+        if (attempt <= 99)
+            return Trinity::StringFormat("{} {}v{} {}", captain->GetName(), uint32(type), uint32(type), attempt);
+        return Trinity::StringFormat("Team {} {}v{}", captain->GetGUID().GetCounter(), uint32(type), uint32(type));
+    };
+
+    for (uint32 attempt = 1; attempt <= 100; ++attempt)
+    {
+        std::string const name = nameFor(attempt);
+        if (!ObjectMgr::IsValidCharterName(name) || sObjectMgr->IsReservedName(name) || GetArenaTeamByName(name))
+            continue;
+
+        ArenaTeam* team = new ArenaTeam();
+        if (!team->Create(captain->GetGUID(), type, name, 4293102085, 101, 4293253939, 4, 4284049911))
+        {
+            delete team;
+            return nullptr;
+        }
+
+        AddArenaTeam(team);
+        TC_LOG_INFO("bg.arena", "ArenaTeamMgr::CreateSoloArenaTeam: made arena team {} '{}' ({}v{}) for {} ({}).",
+            team->GetId(), team->GetName(), uint32(type), uint32(type), captain->GetName(), captain->GetGUID().ToString());
+        return team;
+    }
+
+    TC_LOG_ERROR("bg.arena", "ArenaTeamMgr::CreateSoloArenaTeam: no free name for a {}v{} team for {} ({}).",
+        uint32(type), uint32(type), captain->GetName(), captain->GetGUID().ToString());
+    return nullptr;
 }
 
 uint32 ArenaTeamMgr::GenerateArenaTeamId()

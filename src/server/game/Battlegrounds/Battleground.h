@@ -632,6 +632,24 @@ class TC_GAME_API Battleground
             return !TakesSeatsInPreparationOnly() || (!IsBotFillMatch() && GetStatus() == STATUS_WAIT_JOIN);
         }
         void SetBotFillMatch(bool enabled) { m_IsBotFillMatch = enabled; }
+        // A rated arena the queue gave one arena team to play against clones
+        // (BattlegroundQueue::StartBotFilledRatedMatches): the side that has
+        // the team, ALLIANCE or HORDE, else 0 - two real teams paired
+        // short-handed are both teams and are rated as stock.
+        uint32 GetBotFillRatedTeam() const
+        {
+            if (!isArena() || !isRated() || !IsBotFillMatch() || IsSquadMatch())
+                return 0;
+            bool const alliance = m_ArenaTeamIds[TEAM_ALLIANCE] != 0;
+            bool const horde = m_ArenaTeamIds[TEAM_HORDE] != 0;
+            return alliance == horde ? 0 : (alliance ? ALLIANCE : HORDE);
+        }
+        // Whether a clone has ever been seated opposite that team; until one
+        // has, the match is no contest and its result counts for nothing.
+        bool HasBotFillOpponentsFielded() const { return m_BotFillOpponentsFielded; }
+        // Whether a person - not a bot - still holds a seat on `team`; one who
+        // dropped keeps theirs until the offline timer gives up on them.
+        bool HasPersonOnTeam(uint32 team) const;
         // A match the queue made for people who would not have bots (a squad
         // match of real squads only): the bot fill leaves its empty seats empty.
         bool IsBotFillRefused() const { return m_IsBotFillRefused; }
@@ -783,11 +801,18 @@ class TC_GAME_API Battleground
         // so a party arrives together.
         void SetSquadSeat(ObjectGuid guid, uint8 squad);
         // Seat `guid` in the emptiest squad on `team`'s side, unless it already
-        // has a seat. Returns the squad.
-        uint8 ClaimSquadSeat(ObjectGuid guid, uint32 team);
+        // has a seat. Returns the squad. With healers wanted in every squad
+        // (SetSquadHealersWanted), a `healer` goes where one is missing most and
+        // anyone else leaves each squad the seats its missing healers need.
+        uint8 ClaimSquadSeat(ObjectGuid guid, uint32 team, bool healer = false);
         void ReleaseSquadSeat(ObjectGuid guid);
         // Seats in `squad` held by somebody, arrived or not.
         uint32 CountSquadSeats(uint8 squad) const;
+        // Seat holders in `squad` who play a healer (Arena::IsSoloShuffleHealer).
+        uint32 CountSquadHealers(uint8 squad) const;
+        // Healers the bot fill means every squad to have; 0 = roles ignored.
+        void SetSquadHealersWanted(uint8 count) { m_SquadHealersWanted = count; }
+        uint8 GetSquadHealersWanted() const { return m_SquadHealersWanted; }
         // Whether two participants fight on the same side: the same squad in a
         // squad match, the same team otherwise. False when either one is not a
         // participant (a spectator, someone gone).
@@ -795,7 +820,7 @@ class TC_GAME_API Battleground
         // Where `guid` starts: its squad's corner in a squad match, its team's
         // start otherwise. Take... claims a squad seat on the way.
         Position const* GetStartPositionFor(ObjectGuid guid, uint32 team) const;
-        Position const* TakeStartPosition(ObjectGuid guid, uint32 team);
+        Position const* TakeStartPosition(ObjectGuid guid, uint32 team, bool healer = false);
         // The middle of the squads' corners, where a squad match converges.
         Position GetSquadArenaCentre() const;
         // What `viewer` is told about `unit` in a squad match (see
@@ -1218,6 +1243,7 @@ class TC_GAME_API Battleground
         std::vector<BattlegroundDropExit> m_DropExits;      // from `battleground_drop_exit`, see GetDropExits()
         std::vector<BattlegroundSquadStart> m_SquadStarts;  // from `battleground_squad_start`, see IsSquadMatch()
         std::map<ObjectGuid, uint8> m_SquadSeats;           // participant (or invitee) -> squad
+        uint8 m_SquadHealersWanted = 0;                     // see SetSquadHealersWanted()
         uint8 m_WinnerSquad;
         uint32 m_SquadArenaTeamIds[MAX_BATTLEGROUND_SQUADS];
         uint32 m_SquadArenaMMR[MAX_BATTLEGROUND_SQUADS];
@@ -1236,6 +1262,7 @@ class TC_GAME_API Battleground
         BattlegroundCustomRules m_CustomRules;
         bool   m_IsBotFillMatch;                            // padded with transient clones, see IsBotFillMatch()
         bool   m_IsBotFillRefused;                          // see IsBotFillRefused()
+        bool   m_BotFillOpponentsFielded = false;           // see HasBotFillOpponentsFielded()
         std::map<ObjectGuid, uint32> m_PreparationSeatTakers; // invited into a clone's seat -> team, see CountPreparationSeatsHeldByClones()
         uint32 m_BotFillSeatsOnTheWay[PVP_TEAMS_COUNT] = { }; // see SetBotFillSeatsOnTheWay()
         bool   m_IsTournamentPool;                         // made from the tournament queue pool, see IsTournamentPool()

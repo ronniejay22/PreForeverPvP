@@ -16,6 +16,7 @@
  */
 
 #include "Battleground.h"
+#include "Arena.h"
 #include "ArenaScore.h"
 #include "BattlegroundMgr.h"
 #include "BattlegroundScore.h"
@@ -308,9 +309,11 @@ void Battleground::Update(uint32 diff)
             }
             break;
         case STATUS_IN_PROGRESS:
-            // Arenas too (skirmishes - nobody rated plays bots): one whose last
-            // person disconnected, or never came in for the seat they were
-            // offered, is not left running for the bots.
+            // Arenas too (skirmishes): one whose last person disconnected, or
+            // never came in for the seat they were offered, is not left running
+            // for the bots. A rated arena keeps the stock grace for somebody who
+            // drops - their rating is at stake - and the last person leaving
+            // one padded with bots forfeits it (RemovePlayerAtLeave).
             if ((isBattleground() || (isArena() && !isRated())) && m_HasEverHadNonVirtualHumanParticipant)
             {
                 if (HasAnyNonVirtualHumanParticipant(this))
@@ -1091,7 +1094,7 @@ void Battleground::SetSquadSeat(ObjectGuid guid, uint8 squad)
         m_SquadSeats[guid] = squad;
 }
 
-uint8 Battleground::ClaimSquadSeat(ObjectGuid guid, uint32 team)
+uint8 Battleground::ClaimSquadSeat(ObjectGuid guid, uint32 team, bool healer)
 {
     if (!IsSquadMatch())
         return BATTLEGROUND_NO_SQUAD;
@@ -1103,18 +1106,48 @@ uint8 Battleground::ClaimSquadSeat(ObjectGuid guid, uint32 team)
     // The emptiest squad on this side. A full one still takes the seat when
     // the whole side is full: a crowded corner beats nowhere to stand, and the
     // queue and the bot fill never ask for more seats than a side has.
+    // With healers wanted, a squad "fits" a healer while it has a free seat
+    // and anyone else while it has a seat more than its missing healers need;
+    // fitting squads come first, and among them a healer goes where most are
+    // missing. Clones load out of order, so this keeps the last seat of a
+    // squad without its healer for the healer still on the way.
+    uint32 const size = GetSquadSize();
     uint8 best = BATTLEGROUND_NO_SQUAD;
     uint32 bestTaken = 0;
+    uint32 bestMissing = 0;
+    bool bestFits = false;
     for (uint8 squad = 0; squad < GetSquadCount(); ++squad)
     {
         if (GetSquadSide(squad) != team)
             continue;
 
         uint32 const taken = CountSquadSeats(squad);
-        if (best == BATTLEGROUND_NO_SQUAD || taken < bestTaken)
+        uint32 missing = 0;
+        bool fits = true;
+        if (m_SquadHealersWanted)
+        {
+            uint32 const healers = CountSquadHealers(squad);
+            uint32 const seatsLeft = size > taken ? size - taken : 0;
+            missing = m_SquadHealersWanted > healers ? m_SquadHealersWanted - healers : 0;
+            fits = healer ? seatsLeft > 0 : seatsLeft > missing;
+        }
+
+        bool better;
+        if (best == BATTLEGROUND_NO_SQUAD)
+            better = true;
+        else if (fits != bestFits)
+            better = fits;
+        else if (healer && missing != bestMissing)
+            better = missing > bestMissing;
+        else
+            better = taken < bestTaken;
+
+        if (better)
         {
             best = squad;
             bestTaken = taken;
+            bestMissing = missing;
+            bestFits = fits;
         }
     }
 
@@ -1134,6 +1167,17 @@ uint32 Battleground::CountSquadSeats(uint8 squad) const
 {
     return uint32(std::count_if(m_SquadSeats.begin(), m_SquadSeats.end(),
         [squad](std::pair<ObjectGuid const, uint8> const& seat) { return seat.second == squad; }));
+}
+
+uint32 Battleground::CountSquadHealers(uint8 squad) const
+{
+    // Seat holders are connected wherever they are: people still on their way
+    // in, and clones from the moment they are made.
+    return uint32(std::count_if(m_SquadSeats.begin(), m_SquadSeats.end(),
+        [squad](std::pair<ObjectGuid const, uint8> const& seat)
+        {
+            return seat.second == squad && Arena::IsSoloShuffleHealer(ObjectAccessor::FindConnectedPlayer(seat.first));
+        }));
 }
 
 bool Battleground::AreTeammates(ObjectGuid left, ObjectGuid right) const
@@ -1164,9 +1208,9 @@ Position const* Battleground::GetStartPositionFor(ObjectGuid guid, uint32 team) 
     return GetTeamStartPosition(GetTeamIndexByTeamId(team));
 }
 
-Position const* Battleground::TakeStartPosition(ObjectGuid guid, uint32 team)
+Position const* Battleground::TakeStartPosition(ObjectGuid guid, uint32 team, bool healer)
 {
-    ClaimSquadSeat(guid, team);
+    ClaimSquadSeat(guid, team, healer);
     return GetStartPositionFor(guid, team);
 }
 
@@ -2039,6 +2083,20 @@ void Battleground::RemovePlayerAtLeave(ObjectGuid guid, bool Transport, bool Sen
                 EndNow();
             }
         }
+        // A rated arena padded with bots is its people's to play. When the last
+        // of them is gone from a side with an arena team - walked out, or dropped
+        // and not back before the offline timer gave up - that team forfeits,
+        // instead of its clones winning or losing its rating for it. RemovePlayer
+        // above may already have ended the match (the side had nobody alive).
+        else if (isArena() && isRated() && IsBotFillMatch() && GetArenaTeamIdForTeam(team) &&
+            (GetStatus() == STATUS_IN_PROGRESS || GetStatus() == STATUS_WAIT_JOIN) &&
+            !HasPersonOnTeam(team))
+        {
+            TC_LOG_DEBUG("bg.battleground",
+                "Battleground::RemovePlayerAtLeave: map={} instance={} - arena team {} has nobody left; it forfeits.",
+                GetMapId(), GetInstanceID(), GetArenaTeamIdForTeam(team));
+            EndBattleground(GetOtherTeam(team));
+        }
     }
 
     // After everything above that reads the squad: the raid it played in, and
@@ -2088,6 +2146,7 @@ void Battleground::Reset()
     m_InBGFreeSlotQueue = false;
     m_HasEverHadNonVirtualHumanParticipant = false;
     m_NoNonVirtualHumanElapsed = 0;
+    m_BotFillOpponentsFielded = false;
     m_PreparationSeatTakers.clear();
     m_SquadSeats.clear();
     m_WinnerSquad = BATTLEGROUND_NO_SQUAD;
@@ -2363,11 +2422,16 @@ void Battleground::AddPlayer(Player* player)
     // Add to list/maps
     m_Players[player->GetGUID()] = bp;
 
+    // The first clone seated opposite the team of a rated bot match is what
+    // makes it a contest (Arena::EndBotFilledRatedMatch).
+    if (uint32 const ratedTeam = GetBotFillRatedTeam(); ratedTeam && team != ratedTeam && IsBotParticipantSession(player->GetSession()))
+        m_BotFillOpponentsFielded = true;
+
     if (IsSquadMatch())
     {
         // The queue seated people when it invited them; anyone who came in
         // another way - a clone placed by its own code, a GM - is seated now.
-        ClaimSquadSeat(player->GetGUID(), team);
+        ClaimSquadSeat(player->GetGUID(), team, m_SquadHealersWanted && Arena::IsSoloShuffleHealer(player));
 
         // Faction and arena byte are sent per viewer in a squad match (see
         // BattlegroundSquadStart), and nothing in them changed just because a
@@ -2733,6 +2797,23 @@ bool Battleground::IsBotParticipantSession(WorldSession const* session) const
         return true;
 
     return m_IsBotFillMatch && session->IsTransientPlayerSession();
+}
+
+bool Battleground::HasPersonOnTeam(uint32 team) const
+{
+    for (auto const& [guid, bgPlayer] : m_Players)
+    {
+        if (bgPlayer.Team != team)
+            continue;
+
+        // Nobody connected under that guid is somebody who dropped: a clone
+        // is never offline, it is taken off the roster instead.
+        Player const* player = ObjectAccessor::FindConnectedPlayer(guid);
+        if (!player || !IsBotParticipantSession(player->GetSession()))
+            return true;
+    }
+
+    return false;
 }
 
 uint32 Battleground::CountPreparationSeatsHeldByClones(uint32 team)

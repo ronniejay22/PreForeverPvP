@@ -5806,6 +5806,13 @@ namespace playerbot
         else if (battleground->GetStatus() == STATUS_IN_PROGRESS)
             SetWaitJoinMovementLock(player, true);
 
+        // A rated arena is never ended here with no winner: that would let a
+        // person facing a loss drop out of a match against bots and have it
+        // count for nothing. The core holds a dropped person's seat for the
+        // offline timer and then has their team forfeit (Battleground::
+        // RemovePlayerAtLeave), and the no-humans rules below are left out.
+        bool const ratedArena = battleground->isArena() && battleground->isRated();
+
         if (battleground->GetStatus() == STATUS_WAIT_JOIN)
         {
             // Soulwell pickup temporarily owns prep-room movement; otherwise
@@ -5814,7 +5821,7 @@ namespace playerbot
             if (!TryAcquireHealthstoneFromSoulwell(player))
                 ForceHoldPlayerAtStartDuringWaitJoin(player);
 
-            if (!HasAnyRealHumanInterestInBattleground(battleground->GetTypeID()))
+            if (!ratedArena && !HasAnyRealHumanInterestInBattleground(battleground->GetTypeID()))
             {
                 battleground->EndBattleground(PVP_TEAM_NEUTRAL);
                 playerbot::LockedErase(g_BattlegroundNoHumanSinceMsByInstance, BuildBattlegroundInstanceKey(battleground));
@@ -5825,7 +5832,7 @@ namespace playerbot
             }
 
             uint64 const battlegroundInstanceKey = BuildBattlegroundInstanceKey(battleground);
-            if (!BattlegroundHasAnyRealHumanPlayers(player))
+            if (!ratedArena && !BattlegroundHasAnyRealHumanPlayers(player))
             {
                 uint32 const nowMs = GameTime::GetGameTimeMS();
                 uint32& noHumanSinceMs = playerbot::LockedGetOrCreate(g_BattlegroundNoHumanSinceMsByInstance, battlegroundInstanceKey);
@@ -5882,7 +5889,7 @@ namespace playerbot
         // shutdown treats any non-virtual session as human, so these matches can
         // persist indefinitely after real humans leave.
         uint64 const battlegroundInstanceKey = BuildBattlegroundInstanceKey(battleground);
-        if (!HasAnyRealHumanInterestInBattleground(battleground->GetTypeID()))
+        if (!ratedArena && !HasAnyRealHumanInterestInBattleground(battleground->GetTypeID()))
         {
             battleground->EndBattleground(PVP_TEAM_NEUTRAL);
             playerbot::LockedErase(g_BattlegroundNoHumanSinceMsByInstance, battlegroundInstanceKey);
@@ -5892,7 +5899,7 @@ namespace playerbot
             return true;
         }
 
-        if (!BattlegroundHasAnyRealHumanPlayers(player))
+        if (!ratedArena && !BattlegroundHasAnyRealHumanPlayers(player))
         {
             uint32 const nowMs = GameTime::GetGameTimeMS();
             uint32& noHumanSinceMs = playerbot::LockedGetOrCreate(g_BattlegroundNoHumanSinceMsByInstance, battlegroundInstanceKey);

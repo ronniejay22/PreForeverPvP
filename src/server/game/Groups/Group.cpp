@@ -2067,7 +2067,7 @@ void Group::UpdateLooterGuid(WorldObject* pLootedObject, bool ifneed)
     }
 }
 
-GroupJoinBattlegroundResult Group::CanJoinBattlegroundQueue(Battleground const* bgOrTemplate, BattlegroundQueueTypeId bgQueueTypeId, uint32 MinPlayerCount, uint32 /*MaxPlayerCount*/, bool isRated, uint32 arenaSlot)
+GroupJoinBattlegroundResult Group::CanJoinBattlegroundQueue(Battleground const* bgOrTemplate, BattlegroundQueueTypeId bgQueueTypeId, uint32 MinPlayerCount, uint32 MaxPlayerCount, bool isRated, uint32 arenaSlot)
 {
     // check if this group is LFG group
     if (isLFGGroup())
@@ -2152,15 +2152,18 @@ GroupJoinBattlegroundResult Group::CanJoinBattlegroundQueue(Battleground const* 
             return ERR_BATTLEGROUND_JOIN_FAILED;
     }
 
-    // A rated arena IS its team, so it plays at exactly the bracket's size. A
-    // skirmish is not: a party smaller than the bracket queues as it stands and
+    // A rated arena IS its team, so as stock it plays at exactly the bracket's
+    // size: the caller passes that size as both bounds. Where the realm fills
+    // rated arenas with clones the caller passes a minimum of one instead, and a
+    // short team queues as it stands, the way a skirmish party does. A skirmish
+    // is not its team: a party smaller than the bracket queues as it stands and
     // the queue finishes the side - with whoever else is waiting, or with clones
     // where the realm fills skirmishes - exactly as it already does for the lone
     // player who queues with no party at all. Only an oversized party is still
     // refused: no side has room for it, so the queue would hold it forever
     // without ever saying why. (Buffle Shuffle passes a whole match's size: it
     // seats a party over both sides.)
-    if (bgOrTemplate->isArena() && (isRated ? memberscount != MinPlayerCount : memberscount > MinPlayerCount))
+    if (bgOrTemplate->isArena() && (memberscount > MaxPlayerCount || (isRated && memberscount < MinPlayerCount)))
         return ERR_ARENA_TEAM_PARTY_SIZE;
 
     return GroupJoinBattlegroundResult(bgOrTemplate->GetTypeID());

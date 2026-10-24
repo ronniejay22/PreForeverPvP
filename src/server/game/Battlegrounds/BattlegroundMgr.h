@@ -135,13 +135,19 @@ class TC_GAME_API BattlegroundMgr
         bool isArenaTesting() const { return m_ArenaTesting; }
         bool isTesting() const { return m_Testing; }
 
-        // Bot-filled battlegrounds and unrated arena skirmishes. For queues
-        // this policy covers, a match may start for real players alone once
-        // the longest-waiting one has reached the applicable wait; the
-        // playerbot module then pads both teams with transient clones. The
-        // module installs the policy on config load, so a build or a realm
-        // without it leaves the queue exactly as stock: nothing here reads
-        // the playerbot configuration directly.
+        // Bot-filled battlegrounds, unrated arena skirmishes and - where the
+        // realm allows it - rated arenas. For queues this policy covers, a
+        // match may start for real players alone once the longest-waiting one
+        // has reached the applicable wait; the playerbot module then pads both
+        // teams with transient clones. The module installs the policy on
+        // config load, so a build or a realm without it leaves the queue
+        // exactly as stock: nothing here reads the playerbot configuration
+        // directly.
+        //
+        // A rated arena is only ever filled for an arena team the queue found
+        // no real opponent for. The clones are no arena team: the match is
+        // scored against an opponent of the team's own matchmaker rating
+        // (Arena::EndBotFilledRatedMatch).
         struct BotFillPolicy
         {
             bool enabled = false;
@@ -150,18 +156,29 @@ class TC_GAME_API BattlegroundMgr
             uint32 queueWaitMs = 0;
             bool skirmishArenasEnabled = false;
             uint32 skirmishArenaQueueWaitMs = 0;
+            bool ratedArenasEnabled = false;
+            uint32 ratedArenaQueueWaitMs = 0;
+            // A character queueing rated alone with no team for the size gets
+            // a team of one made for it (ArenaTeamMgr::CreateSoloArenaTeam).
+            bool ratedArenaAutoCreateTeam = false;
         };
         void SetBotFillPolicy(BotFillPolicy policy) { _botFillPolicy = std::move(policy); }
         bool IsBotFillBattleground(BattlegroundTypeId bgTypeId) const;
         bool IsBotFillSkirmishArena(uint8 arenaType) const;
+        bool IsBotFillRatedArena(uint8 arenaType) const;
         // Without an arena size: whether this realm fills skirmishes at all,
         // which is what decides if the Battlegrounds tab offers the "Arena
         // bots" toggle. IsBotFillSkirmishArena answers for one size.
         bool IsBotFillSkirmishArenaEnabled() const { return _botFillPolicy.enabled && _botFillPolicy.skirmishArenasEnabled; }
+        // The same for rated arenas; also what the arena window is told
+        // (CCGAME ARENARATED) to decide whether its rated rows can be joined.
+        bool IsBotFillRatedArenaEnabled() const { return _botFillPolicy.enabled && _botFillPolicy.ratedArenasEnabled; }
+        bool AutoCreatesRatedArenaTeams() const { return IsBotFillRatedArenaEnabled() && _botFillPolicy.ratedArenaAutoCreateTeam; }
         uint32 GetBotFillQueueWaitMs(uint8 arenaType = 0) const
         {
             return arenaType ? _botFillPolicy.skirmishArenaQueueWaitMs : _botFillPolicy.queueWaitMs;
         }
+        uint32 GetBotFillRatedArenaQueueWaitMs() const { return _botFillPolicy.ratedArenaQueueWaitMs; }
 
         static BattlegroundQueueTypeId BGQueueTypeId(BattlegroundTypeId bgTypeId, uint8 arenaType);
         static BattlegroundTypeId BGTemplateId(BattlegroundQueueTypeId bgQueueTypeId);
