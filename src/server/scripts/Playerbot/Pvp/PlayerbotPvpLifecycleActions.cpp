@@ -6080,9 +6080,23 @@ namespace playerbot
 
         if (IsRecoveringByEatingOrDrinking(player))
         {
-            if (player->isMoving())
-                player->StopMoving();
-            return true;
+            // Up the moment the team comes under attack (PvpCore::IsTeamInDanger):
+            // a seated bot used to finish its drink while its partner died. The
+            // class pass later in this tick then picks a heal or an attack.
+            if (playerbot::PvpCore::IsTeamInDanger(player))
+            {
+                ClearEatDrinkAurasForMovement(player);
+                if (player->IsSitState())
+                    player->SetStandState(UNIT_STAND_STATE_STAND);
+                TC_LOG_DEBUG("playerbots.pvp.lifecycle", "Playerbot PvP lifecycle: {} stopped eating/drinking - the team is in a fight.",
+                    player->GetName());
+            }
+            else
+            {
+                if (player->isMoving())
+                    player->StopMoving();
+                return true;
+            }
         }
 
         if (Battleground* battleground = player->GetBattleground())

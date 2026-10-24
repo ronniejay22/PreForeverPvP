@@ -338,6 +338,9 @@ public:
     static uint32 CountHumanPlayersOnBattlegroundTeam(Player const* player);
     static GameObject* FindUsableLightwell(Player const* player, float maxDistance);
     static bool ShouldSeekLightwell(Player const* player);
+    // Whether the bot or a teammate near it is in a fight, in a battleground or
+    // an arena: no time to sit down and eat or drink, and time to get up.
+    static bool IsTeamInDanger(Player const* player);
     static GameObject* FindUsableSoulwell(Player const* player, float maxDistance);
     static bool HasHealthstone(Player const* player);
     static bool IsBattlegroundFlagCarrier(Player const* player);

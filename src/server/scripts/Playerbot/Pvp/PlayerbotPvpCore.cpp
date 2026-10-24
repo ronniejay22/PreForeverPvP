@@ -70,6 +70,16 @@
 namespace
 {
 struct SpellDecision;
+
+// Whether a bot or the teammates around it are in a fight - which is no time to
+// sit down to eat or drink (EvaluateTeamDanger).
+struct TeamDanger
+{
+    bool inDanger = false;
+    ObjectGuid endangeredAlly;      // the lowest on health of the teammates in danger, when asked for
+};
+TeamDanger EvaluateTeamDanger(Player const* player, bool findAlly);
+
 bool HasHostileTarget(Player const* player, Unit const* target);
 void SetWarriorGapCloserDiagnostic(Player const* player, std::string const& diagnostic);
 void SetEveryManForHimselfDiagnostic(Player const* player, std::string const& diagnostic);
@@ -818,8 +828,10 @@ bool HasCastTimeSpellTargetingPlayer(Unit const* caster, Player const* target)
         if (!player || !player->IsInCombat())
             return false;
 
-        bool const wantsDrink = player->GetMaxPower(POWER_MANA) > 0 && player->GetPowerPct(POWER_MANA) < 35.0f;
-        bool const wantsEat = player->HealthBelowPct(50);
+        // Dropping out of a fight to drink or eat leaves a teammate in it alone.
+        bool const teammateInDanger = !EvaluateTeamDanger(player, true).endangeredAlly.IsEmpty();
+        bool const wantsDrink = !teammateInDanger && player->GetMaxPower(POWER_MANA) > 0 && player->GetPowerPct(POWER_MANA) < 35.0f;
+        bool const wantsEat = !teammateInDanger && player->HealthBelowPct(50);
         bool const hunterWantsTrap = player->GetClass() == CLASS_HUNTER &&
             (IsSpellReady(player, 1499) || IsSpellReady(player, 14311) || IsSpellReady(player, 13809));
         bool const rogueWantsStealth = player->GetClass() == CLASS_ROGUE && !player->HasStealthAura() && IsSpellReady(player, 1784);
@@ -1559,7 +1571,8 @@ bool IsHunterExactDeadZone(Player const* player, Unit const* target)
         bool const maintainExistingDrink = !player->IsInCombat() &&
             player->GetMaxPower(POWER_MANA) > 0 &&
             player->HasAura(kPlayerbotDrinkSpell) &&
-            player->GetPowerPct(POWER_MANA) < 50.0f;
+            player->GetPowerPct(POWER_MANA) < 50.0f &&
+            !EvaluateTeamDanger(player, false).inDanger;
 
     // A selected enemy can remain valid across most of a battleground. Only
     // let it suppress out-of-combat utility when it is actually close enough
@@ -2807,15 +2820,24 @@ bool MeetsCasterAuraStateRequirements(Player const* player, uint32 spellId)
     if (IsInHazardousLiquidForRecovery(player) || player->IsInWater())
         return decision;
 
+    // Nobody sits down while the team is in a fight - however low on mana,
+    // however sticky a drink already started (EvaluateTeamDanger). Mounting
+    // waits too: a teammate under attack nearby is somewhere to run, not ride.
+    if (EvaluateTeamDanger(player, false).inDanger)
+        return decision;
+
     // A map that refused the free eat/drink (PvpClassActions::IsRefreshmentRefused)
     // offers neither: the bot keeps walking instead of stopping to sit down again.
+    // In an arena a bot sits down for a real loss only, not a few points: every
+    // sit is a moment it is slow to answer the next fight.
     bool const refreshmentRefused = playerbot::PvpClassActions::IsRefreshmentRefused(player);
+    bool const inArena = player->InArena();
     bool const usesMana = player->GetMaxPower(POWER_MANA) > 0;
     float const manaPct = usesMana ? player->GetPowerPct(POWER_MANA) : 100.0f;
-    bool const needsDrink = !refreshmentRefused && usesMana && manaPct < 100.0f;
+    bool const needsDrink = !refreshmentRefused && usesMana && manaPct < (inArena ? 60.0f : 100.0f);
     bool const keepDrinkingFloor = usesMana && manaPct < 50.0f;
     bool const urgentlyNeedsDrink = needsDrink && (player->GetPowerPct(POWER_MANA) < 35.0f || IsLowOrOutOfManaForFallback(player));
-    bool const needsFood = !refreshmentRefused && player->GetHealthPct() < 100.0f;
+    bool const needsFood = !refreshmentRefused && player->GetHealthPct() < (inArena ? 70.0f : 100.0f);
     bool const hasEatAura = player->HasAura(SPELL_PLAYERBOT_OUT_OF_COMBAT_EAT);
     bool const hasDrinkAura = player->HasAura(SPELL_PLAYERBOT_OUT_OF_COMBAT_DRINK);
 
@@ -4205,6 +4227,96 @@ Unit const* FindEngagedPvpOpponent(Player const* player)
     }
 
     return nearest;
+}
+
+// EvaluateTeamDanger. A teammate this close is one to look after (all of any
+// arena); one in a fight below this much health, or with anybody on it, is in
+// danger; an enemy this close to the bot, or to a teammate, keeps the bot on
+// its feet; and a scare lasts this long after it was last seen, so an enemy
+// stepping behind a pillar does not sit the bot straight back down.
+constexpr float TEAM_DANGER_ALLY_RANGE = 60.0f;
+constexpr float TEAM_DANGER_ALLY_HEALTH_PCT = 80.0f;
+constexpr float TEAM_DANGER_ENEMY_NEAR_SELF = 40.0f;
+constexpr float TEAM_DANGER_ENEMY_NEAR_ALLY = 30.0f;
+constexpr uint32 TEAM_DANGER_HOLD_TOKEN = 900011;   // a PvpClassActions caster cooldown slot
+constexpr std::chrono::milliseconds TEAM_DANGER_HOLD = std::chrono::milliseconds(4000);
+
+// Whether the bot, or a teammate near it, is in a fight: the bot is in combat
+// or engaged, an enemy is on it, casting at it or close by; or a teammate has
+// attackers, is in combat and hurt, is the victim or the cast target of an
+// enemy, or has an enemy close by. Read off the whole map, line of sight or
+// not - a teammate dying behind a pillar is exactly the one that matters.
+//
+// Every guard on eating and drinking used to look at the bot alone, and PvP
+// combat lapses five seconds after the last blow: a healer nobody was hitting
+// sat down to drink while its partner died. Only in battlegrounds and arenas;
+// with `findAlly` it also names the teammate most in need.
+TeamDanger EvaluateTeamDanger(Player const* player, bool findAlly)
+{
+    TeamDanger danger;
+    if (!player || !player->IsAlive() || !player->InBattleground())
+        return danger;
+
+    Map* map = player->FindMap();
+    if (!map)
+        return danger;
+
+    bool seen = player->IsInCombat() || FindEngagedPvpOpponent(player) != nullptr;
+
+    std::vector<Player const*> enemies;
+    std::vector<Player const*> allies;
+    for (Map::PlayerList::const_iterator itr = map->GetPlayers().begin(); itr != map->GetPlayers().end(); ++itr)
+    {
+        Player const* other = itr->GetSource();
+        if (!other || other == player || !other->IsAlive() || !other->IsInMap(player))
+            continue;
+
+        if (HasHostileTarget(player, other))
+            enemies.push_back(other);
+        else if (player->IsWithinDistInMap(other, TEAM_DANGER_ALLY_RANGE) && IsFriendlySupportTarget(player, other))
+            allies.push_back(other);
+    }
+
+    if (!seen)
+        for (Player const* enemy : enemies)
+            if (player->IsWithinDistInMap(enemy, TEAM_DANGER_ENEMY_NEAR_SELF) || enemy->GetVictim() == player ||
+                HasCastTimeSpellTargetingPlayer(enemy, player))
+            {
+                seen = true;
+                break;
+            }
+
+    float lowestHealth = 101.0f;
+    for (Player const* ally : allies)
+    {
+        if (seen && !findAlly)
+            break;
+
+        bool allyInDanger = !ally->getAttackers().empty() ||
+            (ally->IsInCombat() && ally->GetHealthPct() < TEAM_DANGER_ALLY_HEALTH_PCT);
+        for (Player const* enemy : enemies)
+        {
+            if (allyInDanger)
+                break;
+            allyInDanger = ally->IsWithinDistInMap(enemy, TEAM_DANGER_ENEMY_NEAR_ALLY) || enemy->GetVictim() == ally ||
+                HasCastTimeSpellTargetingPlayer(enemy, ally);
+        }
+
+        if (!allyInDanger)
+            continue;
+
+        seen = true;
+        if (findAlly && ally->GetHealthPct() < lowestHealth)
+        {
+            lowestHealth = ally->GetHealthPct();
+            danger.endangeredAlly = ally->GetGUID();
+        }
+    }
+
+    if (seen)
+        playerbot::PvpClassActions::RegisterCasterSpellCooldown(player, TEAM_DANGER_HOLD_TOKEN, TEAM_DANGER_HOLD);
+    danger.inDanger = seen || playerbot::PvpClassActions::IsCasterSpellCooldownActive(player, TEAM_DANGER_HOLD_TOKEN);
+    return danger;
 }
 
 uint32 GetCurrentCastSpellId(Unit const* unit)
@@ -8721,6 +8833,11 @@ bool PvpCore::ShouldSeekLightwell(Player const* player)
         !player->HasAura(kPriestLightwellRenewSpellId) && FindUsableLightwell(player, 20.0f) != nullptr;
 }
 
+bool PvpCore::IsTeamInDanger(Player const* player)
+{
+    return EvaluateTeamDanger(player, false).inDanger;
+}
+
 bool PvpCore::HasHealthstone(Player const* player)
 {
     if (!player)
@@ -9583,6 +9700,21 @@ PvpValues PvpCore::CollectValues(Player const* player)
         }
     }
 
+    // A bot still eating or drinking when its team comes under attack gets up
+    // (EvaluateTeamDanger), so this decision is a heal or an attack. The
+    // tactical tick does the same ahead of this; this covers any path past it.
+    if ((player->HasAura(SPELL_PLAYERBOT_OUT_OF_COMBAT_EAT) || player->HasAura(SPELL_PLAYERBOT_OUT_OF_COMBAT_DRINK)) &&
+        EvaluateTeamDanger(player, false).inDanger)
+    {
+        if (Player* mutablePlayer = const_cast<Player*>(player))
+        {
+            mutablePlayer->RemoveAurasDueToSpell(SPELL_PLAYERBOT_OUT_OF_COMBAT_EAT);
+            mutablePlayer->RemoveAurasDueToSpell(SPELL_PLAYERBOT_OUT_OF_COMBAT_DRINK);
+            if (mutablePlayer->IsSitState())
+                mutablePlayer->SetStandState(UNIT_STAND_STATE_STAND);
+        }
+    }
+
     bool const inSpiritOfRedemption = IsPriestInSpiritOfRedemption(player);
     bool const movementPreventedByRoot = PvpCore::IsMovementPreventedByRoot(player);
     bool const criticalLowMana = !inSpiritOfRedemption &&
@@ -9631,7 +9763,10 @@ PvpValues PvpCore::CollectValues(Player const* player)
                 return context;
             }
 
-            if (IsSpellReady(player, SPELL_PLAYERBOT_OUT_OF_COMBAT_DRINK))
+            // Not while the team is in a fight (EvaluateTeamDanger): a dry
+            // healer standing is still a target to peel and a body in the way,
+            // and the wand and melee fallbacks below still have something to do.
+            if (IsSpellReady(player, SPELL_PLAYERBOT_OUT_OF_COMBAT_DRINK) && !EvaluateTeamDanger(player, false).inDanger)
             {
                 context.actionName = "drink";
                 context.reason = "critical low mana recover";
@@ -9978,6 +10113,30 @@ PvpValues PvpCore::CollectValues(Player const* player)
                     ConsiderMovementDirective(context, PvpClassSpellContext::MovementDirective::ReachSpellRange, allyMovementTarget->GetGUID(),
                         ComputeApproachFollowRange(GetConfiguredHealRange()), "reach party member to heal", "party member to heal out of spell range", 72.0f);
                 }
+            }
+        }
+
+        // An arena healer with nothing to cast goes to a teammate in danger it
+        // cannot heal from where it stands - behind a pillar, or too far
+        // (EvaluateTeamDanger reads the whole map, line of sight or not; heal
+        // targeting needs it). On arrival the heal selectors see the teammate.
+        // Out of sight it closes in, as "recover los" does, since a teammate
+        // within heal range behind a pillar is no nearer to being healed.
+        if (!context.spellId && context.movementDirective == PvpClassSpellContext::MovementDirective::None &&
+            player->InArena() && CanUseHealRangeSpacing(player->GetClass()) && !movementPreventedByRoot)
+        {
+            TeamDanger const danger = EvaluateTeamDanger(player, true);
+            Unit const* endangeredAlly = danger.endangeredAlly.IsEmpty() ? nullptr : resolveTargetByGuid(danger.endangeredAlly);
+            if (endangeredAlly)
+            {
+                float const distance = player->GetDistance(endangeredAlly);
+                float const healReach = ComputeApproachFollowRange(GetConfiguredHealRange());
+                if (!player->IsWithinLOSInMap(endangeredAlly))
+                    ConsiderMovementDirective(context, PvpClassSpellContext::MovementDirective::ReachSpellRange, endangeredAlly->GetGUID(),
+                        std::clamp(distance - 2.0f, 1.5f, healReach), "reach endangered ally", "teammate in danger out of sight", 80.0f);
+                else if (distance > GetConfiguredHealRange())
+                    ConsiderMovementDirective(context, PvpClassSpellContext::MovementDirective::ReachSpellRange, endangeredAlly->GetGUID(),
+                        healReach, "reach endangered ally", "teammate in danger out of heal range", 80.0f);
             }
         }
 
