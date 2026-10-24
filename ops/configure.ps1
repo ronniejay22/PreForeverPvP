@@ -40,6 +40,17 @@ Write-Conf (Join-Path $repo 'centurion\conf\worldserver.conf') (Join-Path $serve
     'BindIP'                = $bindIp
     # the live file runs without a console; ours needs it for GM commands
     'Console.Enable'        = '1'
+    # The bots and Centurion's spell data generate a steady stream of aura,
+    # spell and script diagnostics that bury the console. Those loggers write
+    # to Server.log only; the console keeps startup progress (Logger.server),
+    # GM commands, SQL errors and command output.
+    'Logger.root'            = '5,Server'
+    'Logger.scripts'         = '3,Server'
+    'Logger.scripts.hotswap' = '3,Server'
+    'Logger.spells'          = '3,Server'
+    'Logger.custom'          = '3,Server'
+    'Logger.arena.replay'    = '3,Server'
+    'Logger.bg.spiritguide'  = '1,Server'
 }
 
 Write-Conf (Join-Path $repo 'src\server\authserver\authserver.conf.dist') (Join-Path $server 'authserver.conf') @{
