@@ -264,16 +264,19 @@ Playerbot.BgFill.RatedArena.Ladder.Teams4v4 = 6
 Playerbot.BgFill.RatedArena.Ladder.Teams5v5 = 6
 
 #    Playerbot.BgFill.RatedArena.Ladder.SimulateMinutes
-#        Description: Every this many minutes each size plays one game on paper: a ladder team at
-#                     random against one of the three nearest it, neither of them in a real match.
+#    Playerbot.BgFill.RatedArena.Ladder.SimulateGames
+#        Description: Every SimulateMinutes minutes each size plays SimulateGames games on paper,
+#                     no team twice in one round: a ladder team at random against one of the
+#                     three nearest it, neither of them in a real match.
 #                     The winner is rolled from the stock Elo chance on their matchmaker ratings,
 #                     with a team of the hard tier (Playerbot.BgFill.Tier.*) counted 150 above its
 #                     rating and one of the easy tier 150 below, so the stronger rosters climb. Both
 #                     teams and their members are rated as a real game would rate them.
-#        Default:     5
-#                     0 - (the ladder's teams only play rated teams)
+#        Default:     5, 1
+#                     0 for either - (the ladder's teams only play rated teams)
 
 Playerbot.BgFill.RatedArena.Ladder.SimulateMinutes = 5
+Playerbot.BgFill.RatedArena.Ladder.SimulateGames = 1
 
 #    Playerbot.BgFill.MaxPerTeam
 #        Description: Team size the clones fill up to, capped by the battleground's own maximum

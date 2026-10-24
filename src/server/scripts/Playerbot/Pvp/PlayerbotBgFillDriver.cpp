@@ -89,6 +89,7 @@ struct BgFillConfig
     bool ladderEnabled = false;
     std::array<uint32, ARENA_TYPE_5v5 + 1> ladderTeams = {};   // by arena type
     uint32 ladderSimulateMs = 5 * MINUTE * IN_MILLISECONDS;
+    uint32 ladderSimulateGames = 1;                             // a size, each round
     uint32 maxPerTeam = 15;
     uint32 clonesPerTick = 2;
     bool useOfflineBots = true;
@@ -1645,15 +1646,81 @@ float LadderTierEdge(ArenaTeam* team)
     return members ? (tiers / float(members) - 1.0f) * 150.0f : 0.0f;
 }
 
-// One game on paper a size: a ladder team at random against one of the three
-// nearest it in matchmaker rating - not the one it met last while there is
-// anybody else - neither of them in a real match. The winner is rolled from the
-// stock Elo chance on their ratings plus LadderTierEdge, and both teams and all
-// their members are rated as a real game would rate them.
-void SimulateLadderGames()
+// One game on paper between two of `teams` (all of one size, none of them in a
+// real match): a team at random against one of the three nearest it in
+// matchmaker rating - not the one it met last while there is anybody else. The
+// winner is rolled from the stock Elo chance on their ratings plus
+// LadderTierEdge, and both teams and all their members are rated as a real game
+// would rate them. Both are taken out of `teams`, so one round never plays a
+// team twice.
+void PlayLadderGameOnPaper(std::vector<ArenaTeam*>& teams, uint8 type)
 {
     constexpr std::size_t NEAREST = 3;
 
+    ArenaTeam* const first = teams[urand(0, uint32(teams.size()) - 1)];
+    uint32 const firstMatchmakerRating = first->GetRosterAverageMMR();
+
+    std::vector<ArenaTeam*> opponents;
+    for (ArenaTeam* team : teams)
+        if (team != first && (teams.size() <= 2 || team->GetId() != first->GetPreviousOpponents()))
+            opponents.push_back(team);
+
+    std::sort(opponents.begin(), opponents.end(), [firstMatchmakerRating](ArenaTeam* left, ArenaTeam* right)
+    {
+        return std::abs(int32(left->GetRosterAverageMMR()) - int32(firstMatchmakerRating)) <
+            std::abs(int32(right->GetRosterAverageMMR()) - int32(firstMatchmakerRating));
+    });
+    ArenaTeam* const second = opponents[urand(0, uint32(std::min(opponents.size(), NEAREST)) - 1)];
+    uint32 const secondMatchmakerRating = second->GetRosterAverageMMR();
+
+    teams.erase(std::remove_if(teams.begin(), teams.end(), [first, second](ArenaTeam* team)
+    {
+        return team == first || team == second;
+    }), teams.end());
+
+    float const firstStrength = std::max(0.0f, float(firstMatchmakerRating) + LadderTierEdge(first));
+    float const secondStrength = std::max(0.0f, float(secondMatchmakerRating) + LadderTierEdge(second));
+    bool const firstWins = roll_chance_f(first->GetChanceAgainst(uint32(firstStrength), uint32(secondStrength)) * 100.0f);
+
+    ArenaTeam* const winner = firstWins ? first : second;
+    ArenaTeam* const loser = firstWins ? second : first;
+    uint32 const winnerMatchmakerRating = firstWins ? firstMatchmakerRating : secondMatchmakerRating;
+    uint32 const loserMatchmakerRating = firstWins ? secondMatchmakerRating : firstMatchmakerRating;
+
+    int32 winnerChange = 0;
+    int32 loserChange = 0;
+    int32 const winnerMatchmakerChange = winner->WonAgainst(winnerMatchmakerRating, loserMatchmakerRating, winnerChange);
+    int32 const loserMatchmakerChange = loser->LostAgainst(loserMatchmakerRating, winnerMatchmakerRating, loserChange);
+
+    std::vector<ObjectGuid> members;
+    for (auto itr = winner->m_membersBegin(); itr != winner->m_membersEnd(); ++itr)
+        members.push_back(itr->Guid);
+    for (ObjectGuid const& member : members)
+        winner->OfflineMemberWon(member, loserMatchmakerRating, winnerMatchmakerChange);
+
+    members.clear();
+    for (auto itr = loser->m_membersBegin(); itr != loser->m_membersEnd(); ++itr)
+        members.push_back(itr->Guid);
+    for (ObjectGuid const& member : members)
+        loser->OfflineMemberLost(member, winnerMatchmakerRating, loserMatchmakerChange);
+
+    winner->SetPreviousOpponents(loser->GetId());
+    loser->SetPreviousOpponents(winner->GetId());
+    winner->SaveToDB();
+    loser->SaveToDB();
+    winner->NotifyStatsChanged();
+    loser->NotifyStatsChanged();
+
+    TC_LOG_INFO("playerbots.bgfill", "Playerbot arena ladder: {}v{} {} ({} {:+}) beat {} ({} {:+}) on paper.",
+        uint32(type), uint32(type), winner->GetName(), winner->GetRating(), winnerChange,
+        loser->GetName(), loser->GetRating(), loserChange);
+}
+
+// A round of games on paper: Ladder.SimulateGames a size, while there are two
+// ladder teams of that size left that are in no real match and have not played
+// this round.
+void SimulateLadderGames()
+{
     for (uint8 type : kLadderArenaTypes)
     {
         std::vector<ArenaTeam*> teams;
@@ -1662,61 +1729,8 @@ void SimulateLadderGames()
                 if (team->GetType() == type && !sBattlegroundMgr->IsArenaTeamInMatch(teamId))
                     teams.push_back(team);
 
-        if (teams.size() < 2)
-            continue;
-
-        ArenaTeam* const first = teams[urand(0, uint32(teams.size()) - 1)];
-        uint32 const firstMatchmakerRating = first->GetRosterAverageMMR();
-
-        std::vector<ArenaTeam*> opponents;
-        for (ArenaTeam* team : teams)
-            if (team != first && (teams.size() <= 2 || team->GetId() != first->GetPreviousOpponents()))
-                opponents.push_back(team);
-
-        std::sort(opponents.begin(), opponents.end(), [firstMatchmakerRating](ArenaTeam* left, ArenaTeam* right)
-        {
-            return std::abs(int32(left->GetRosterAverageMMR()) - int32(firstMatchmakerRating)) <
-                std::abs(int32(right->GetRosterAverageMMR()) - int32(firstMatchmakerRating));
-        });
-        ArenaTeam* const second = opponents[urand(0, uint32(std::min(opponents.size(), NEAREST)) - 1)];
-        uint32 const secondMatchmakerRating = second->GetRosterAverageMMR();
-
-        float const firstStrength = std::max(0.0f, float(firstMatchmakerRating) + LadderTierEdge(first));
-        float const secondStrength = std::max(0.0f, float(secondMatchmakerRating) + LadderTierEdge(second));
-        bool const firstWins = roll_chance_f(first->GetChanceAgainst(uint32(firstStrength), uint32(secondStrength)) * 100.0f);
-
-        ArenaTeam* const winner = firstWins ? first : second;
-        ArenaTeam* const loser = firstWins ? second : first;
-        uint32 const winnerMatchmakerRating = firstWins ? firstMatchmakerRating : secondMatchmakerRating;
-        uint32 const loserMatchmakerRating = firstWins ? secondMatchmakerRating : firstMatchmakerRating;
-
-        int32 winnerChange = 0;
-        int32 loserChange = 0;
-        int32 const winnerMatchmakerChange = winner->WonAgainst(winnerMatchmakerRating, loserMatchmakerRating, winnerChange);
-        int32 const loserMatchmakerChange = loser->LostAgainst(loserMatchmakerRating, winnerMatchmakerRating, loserChange);
-
-        std::vector<ObjectGuid> members;
-        for (auto itr = winner->m_membersBegin(); itr != winner->m_membersEnd(); ++itr)
-            members.push_back(itr->Guid);
-        for (ObjectGuid const& member : members)
-            winner->OfflineMemberWon(member, loserMatchmakerRating, winnerMatchmakerChange);
-
-        members.clear();
-        for (auto itr = loser->m_membersBegin(); itr != loser->m_membersEnd(); ++itr)
-            members.push_back(itr->Guid);
-        for (ObjectGuid const& member : members)
-            loser->OfflineMemberLost(member, winnerMatchmakerRating, loserMatchmakerChange);
-
-        winner->SetPreviousOpponents(loser->GetId());
-        loser->SetPreviousOpponents(winner->GetId());
-        winner->SaveToDB();
-        loser->SaveToDB();
-        winner->NotifyStatsChanged();
-        loser->NotifyStatsChanged();
-
-        TC_LOG_INFO("playerbots.bgfill", "Playerbot arena ladder: {}v{} {} ({} {:+}) beat {} ({} {:+}) on paper.",
-            uint32(type), uint32(type), winner->GetName(), winner->GetRating(), winnerChange,
-            loser->GetName(), loser->GetRating(), loserChange);
+        for (uint32 game = 0; game < g_Config.ladderSimulateGames && teams.size() >= 2; ++game)
+            PlayLadderGameOnPaper(teams, type);
     }
 }
 }
@@ -1742,6 +1756,7 @@ void PlayerbotBgFillDriver::LoadConfig()
     config.ladderTeams[ARENA_TYPE_5v5] = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.RatedArena.Ladder.Teams5v5", 6), 0));
     config.ladderSimulateMs = uint32(std::max<int32>(
         sConfigMgr->GetIntDefault("Playerbot.BgFill.RatedArena.Ladder.SimulateMinutes", 5), 0)) * MINUTE * IN_MILLISECONDS;
+    config.ladderSimulateGames = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.RatedArena.Ladder.SimulateGames", 1), 0));
     config.maxPerTeam = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.MaxPerTeam", 15), 0));
     config.clonesPerTick = uint32(std::max<int32>(sConfigMgr->GetIntDefault("Playerbot.BgFill.ClonesPerTick", 2), 1));
     config.useOfflineBots = sConfigMgr->GetBoolDefault("Playerbot.BgFill.UseOfflineBots", true);
