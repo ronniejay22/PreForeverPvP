@@ -15,3 +15,7 @@ MYSQL="$MYSQL" ./import.sh
 # reference data the snapshot leaves out (see the comment in the file)
 $MYSQL "${CHAR_DB:-characters}" < "$ROOT/src/ops/sql/characters-addons.sql"
 echo "applied ops/sql/characters-addons.sql"
+
+# world rows of our own (see the comment in the file)
+$MYSQL "${WORLD_DB:-world}" < "$ROOT/src/ops/sql/world-addons.sql"
+echo "applied ops/sql/world-addons.sql"

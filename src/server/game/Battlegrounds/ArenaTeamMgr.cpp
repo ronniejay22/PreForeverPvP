@@ -25,6 +25,7 @@
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "StringFormat.h"
+#include <algorithm>
 
 ArenaTeamMgr::ArenaTeamMgr()
 {
@@ -58,6 +59,28 @@ ArenaTeam* ArenaTeamMgr::GetArenaTeamByName(std::string_view arenaTeamName) cons
         if (StringEqualI(arenaTeamName, team->GetName()))
             return team;
     return nullptr;
+}
+
+std::vector<ArenaTeam*> ArenaTeamMgr::GetStandings(uint32 type) const
+{
+    std::vector<ArenaTeam*> teams;
+    for (auto const& [teamId, team] : ArenaTeamStore)
+        if (team->GetType() == type)
+            teams.push_back(team);
+
+    std::sort(teams.begin(), teams.end(), [](ArenaTeam const* left, ArenaTeam const* right)
+    {
+        ArenaTeamStats const& a = left->GetStats();
+        ArenaTeamStats const& b = right->GetStats();
+        if (a.Rating != b.Rating)
+            return a.Rating > b.Rating;
+        if (a.SeasonWins != b.SeasonWins)
+            return a.SeasonWins > b.SeasonWins;
+        if (a.SeasonGames != b.SeasonGames)
+            return a.SeasonGames < b.SeasonGames;
+        return left->GetName() < right->GetName();
+    });
+    return teams;
 }
 
 ArenaTeam* ArenaTeamMgr::GetArenaTeamByCaptain(ObjectGuid guid) const

@@ -20,6 +20,7 @@
 
 #include "ArenaTeam.h"
 #include <unordered_map>
+#include <vector>
 
 class TC_GAME_API ArenaTeamMgr
 {
@@ -46,6 +47,10 @@ public:
     ArenaTeam* CreateSoloArenaTeam(Player* captain, uint8 type);
 
     ArenaTeamContainer const& GetArenaTeams() const { return ArenaTeamStore; }
+    // Every team of one arena size, best first: by rating, then season wins,
+    // then the fewest season games, then name. `.arena ladder` and the arena
+    // ladder keeper both list it.
+    std::vector<ArenaTeam*> GetStandings(uint32 type) const;
 
     void DistributeArenaPoints();
 

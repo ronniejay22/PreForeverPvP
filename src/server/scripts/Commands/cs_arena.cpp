@@ -264,23 +264,12 @@ public:
             return false;
         }
 
-        std::vector<ArenaTeam*> teams;
-        for (auto [teamId, team] : sArenaTeamMgr->GetArenaTeams())
-            if (team->GetType() == type)
-                teams.push_back(team);
-
+        std::vector<ArenaTeam*> const teams = sArenaTeamMgr->GetStandings(type);
         if (teams.empty())
         {
             handler->SendSysMessage(Trinity::StringFormat("There are no {}v{} arena teams yet.", uint32(type), uint32(type)));
             return true;
         }
-
-        std::sort(teams.begin(), teams.end(), [](ArenaTeam const* left, ArenaTeam const* right)
-        {
-            if (left->GetRating() != right->GetRating())
-                return left->GetRating() > right->GetRating();
-            return left->GetStats().SeasonWins > right->GetStats().SeasonWins;
-        });
 
         Player const* self = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         uint32 const ownTeamId = self ? self->GetArenaTeamId(ArenaTeam::GetSlotByType(type)) : 0;
