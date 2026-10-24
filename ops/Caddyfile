@@ -1,0 +1,38 @@
+{
+	# certificates and Caddy's state, where the SYSTEM service can always find them
+	storage file_system D:/WoWServer/caddy/data
+}
+
+# Players: launcher patches and self-update, the landing page, and sign-up.
+# HTTPS certificates come from Let's Encrypt automatically.
+preforeverpvp.duckdns.org {
+	root * D:/WoWServer/web
+	encode zstd gzip
+
+	# clients only re-download a patch when its .version changes; never cache those
+	@versions path *.version
+	header @versions Cache-Control "no-store"
+
+	handle /signup* {
+		reverse_proxy 127.0.0.1:8081
+	}
+	handle {
+		file_server
+	}
+
+	log {
+		output file D:/WoWServer/logs/caddy-access.log {
+			roll_size 20MiB
+			roll_keep 5
+		}
+	}
+}
+
+# This PC's own client, without going out through the router and back.
+http://127.0.0.1:8000 {
+	bind 127.0.0.1
+	root * D:/WoWServer/web
+	@versions path *.version
+	header @versions Cache-Control "no-store"
+	file_server
+}
