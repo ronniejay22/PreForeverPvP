@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create an account · {{ server_name }}</title>
+<style>
+  :root { --bg: #f6f4ef; --fg: #1d1b18; --muted: #6b655c; --card: #fffdf8; --line: #ddd6ca; --accent: #8a2c1b; --err: #a11d1d; --ok: #1f6b3a; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15130f; --fg: #ece6db; --muted: #a39b8e; --card: #1e1b16; --line: #3a342b; --accent: #e07a5f; --err: #ff8a80; --ok: #7bd389; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 16px;
+         background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { width: 100%; max-width: 380px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 28px; }
+  h1 { margin: 0 0 4px; font-size: 1.4rem; }
+  p.sub { margin: 0 0 20px; color: var(--muted); }
+  label { display: block; margin: 14px 0 6px; font-weight: 600; font-size: .95rem; }
+  input { width: 100%; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); font: inherit; }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .hint { color: var(--muted); font-size: .85rem; margin-top: 4px; }
+  button { margin-top: 22px; width: 100%; padding: 11px; border: 0; border-radius: 8px; background: var(--accent); color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
+  .msg { padding: 10px 12px; border-radius: 8px; margin-bottom: 8px; border: 1px solid currentColor; }
+  .err { color: var(--err); }
+  .ok { color: var(--ok); }
+  .hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+  code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>{{ server_name }}</h1>
+  {% if created %}
+    <div class="msg ok">Account <strong>{{ created }}</strong> is ready.</div>
+    <p>Start the game with the launcher and log in with that name and your password.
+    {% if realmlist %}The realm list is <code>{{ realmlist }}</code>.{% endif %}</p>
+  {% else %}
+    <p class="sub">Create an account</p>
+    {% if error %}<div class="msg err" role="alert">{{ error }}</div>{% endif %}
+    <form method="post" action="/signup" autocomplete="off">
+      <label for="username">Account name</label>
+      <input id="username" name="username" value="{{ username or '' }}" required minlength="3" maxlength="16" pattern="[A-Za-z0-9]{3,16}" autocapitalize="off" spellcheck="false">
+      <div class="hint">3 to 16 letters and digits. This is what you log in with.</div>
+
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" required minlength="6" maxlength="16" autocomplete="new-password">
+      <div class="hint">6 to 16 characters, no spaces. The game ignores upper and lower case.</div>
+
+      <label for="confirm">Password again</label>
+      <input id="confirm" name="confirm" type="password" required minlength="6" maxlength="16" autocomplete="new-password">
+
+      <div class="hp" aria-hidden="true">
+        <label for="website">Leave this empty</label>
+        <input id="website" name="website" tabindex="-1" autocomplete="off">
+      </div>
+
+      <button type="submit">Create account</button>
+    </form>
+  {% endif %}
+</main>
+</body>
+</html>
