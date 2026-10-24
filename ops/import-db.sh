@@ -9,4 +9,9 @@ set -euo pipefail
 ROOT=${ROOT:-/d/WoWServer}
 export PATH="/c/Program Files/MySQL/MySQL Server 8.4/bin:$PATH"
 cd "$ROOT/src/centurion/sql"
-MYSQL="mysql --defaults-extra-file=$(cygpath -m "$ROOT/secrets/mysql-root.cnf") --default-character-set=utf8mb4" ./import.sh
+MYSQL="mysql --defaults-extra-file=$(cygpath -m "$ROOT/secrets/mysql-root.cnf") --default-character-set=utf8mb4"
+MYSQL="$MYSQL" ./import.sh
+
+# reference data the snapshot leaves out (see the comment in the file)
+$MYSQL "${CHAR_DB:-characters}" < "$ROOT/src/ops/sql/characters-addons.sql"
+echo "applied ops/sql/characters-addons.sql"
